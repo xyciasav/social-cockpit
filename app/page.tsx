@@ -1,9 +1,9 @@
 "use client";
 
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
-type Tab = "Overview" | "Campaigns" | "Recommendations" | "Imports";
-const tabs: Tab[] = ["Overview", "Campaigns", "Recommendations", "Imports"];
+type Tab = "Overview" | "Content" | "Campaigns" | "Recommendations" | "Imports";
+const tabs: Tab[] = ["Overview", "Content", "Campaigns", "Recommendations", "Imports"];
 
 const posts = [
   { title: "Neighbors make the night", platform: "Instagram", type: "Community story", reach: 8240, engagement: 9.8, delta: 122, tone: "Conversational", media: "Photo", date: "Aug 8" },
@@ -56,7 +56,7 @@ export default function Home() {
     <aside>
       <div className="brand"><div className="brandmark">SC</div><div><strong>Social Cockpit</strong><span>Performance intelligence</span></div></div>
       <nav aria-label="Main navigation">
-        {tabs.map((item, i) => <button key={item} className={tab === item ? "active" : ""} onClick={() => setTab(item)}><Icon name={["overview","campaign","spark","import"][i]} />{item}{item === "Recommendations" && <em>4</em>}</button>)}
+        {tabs.map((item, i) => <button key={item} className={tab === item ? "active" : ""} onClick={() => setTab(item)}><Icon name={["overview","import","campaign","spark","import"][i]} />{item}{item === "Recommendations" && <em>4</em>}</button>)}
       </nav>
       <div className="side-bottom"><div className="workspace-dot">RH</div><div><strong>Riverlight HQ</strong><span>3 accounts connected</span></div><Icon name="chevron" /></div>
     </aside>
@@ -65,6 +65,7 @@ export default function Home() {
       <header><div><span className="eyebrow">RIVERLIGHT HQ / ANALYTICS</span><h1>{tab}</h1></div><div className="header-actions"><label className="select">{range}<select value={range} onChange={e => setRange(e.target.value)}><option>Last 30 days</option><option>Last 90 days</option><option>This year</option></select></label><button className="primary" onClick={() => setTab("Imports")}>Import data <Icon name="arrow" /></button></div></header>
 
       {tab === "Overview" && <Overview range={range} />}
+      {tab === "Content" && <ContentWorkspace />}
       {tab === "Campaigns" && <Campaigns />}
       {tab === "Recommendations" && <Recommendations optimize={optimize} setOptimize={setOptimize} />}
       {tab === "Imports" && <Imports file={file} headers={headers} rows={rows} detected={detected} input={input} loadFile={loadFile} importReady={importReady} />}
@@ -72,6 +73,18 @@ export default function Home() {
     <button className="ask-ai" onClick={() => setAssistantOpen(true)}><span>✦</span> Ask AI</button>
     <AssistantPanel open={assistantOpen} close={() => setAssistantOpen(false)} currentView={tab} useAnalytics={optimize} />
   </div>;
+}
+
+type Draft = { id:string; caption:string; status:string; proposed_at:number|null; content_type:string; account_id:string; approval_status?:string };
+
+function ContentWorkspace(){
+  const [drafts,setDrafts]=useState<Draft[]>([]); const [caption,setCaption]=useState(""); const [date,setDate]=useState(""); const [loading,setLoading]=useState(true); const [error,setError]=useState("");
+  const apiHeaders={"content-type":"application/json","x-workspace-id":"ws_riverlight"};
+  async function refresh(){setLoading(true);try{await fetch("/api/bootstrap",{method:"POST",headers:apiHeaders});const res=await fetch("/api/approvals",{headers:apiHeaders});const data=await res.json();if(!res.ok)throw new Error(data.error);setDrafts(data.approvals||[]);setError("")}catch(e){setError(e instanceof Error?e.message:"Unable to load content")}finally{setLoading(false)}}
+  useEffect(()=>{refresh()},[]);
+  async function create(){if(!caption.trim())return;const res=await fetch("/api/posts",{method:"POST",headers:apiHeaders,body:JSON.stringify({caption,proposedAt:date||null,contentType:"Announcement",tone:"Conversational",cta:"Learn more",mediaType:"Text only"})});const data=await res.json();if(!res.ok){setError(data.error);return}setCaption("");setDate("");await refresh()}
+  async function decide(postId:string,decision:"approved"|"rejected"){const res=await fetch("/api/approvals",{method:"PATCH",headers:apiHeaders,body:JSON.stringify({postId,decision})});const data=await res.json();if(!res.ok){setError(data.error);return}await refresh()}
+  return <section className="content-workspace"><article className="panel draft-builder"><span className="kicker">NEW CONTENT</span><h2>Create a real draft</h2><p>Drafts are stored in the active workspace and enter the approval queue automatically.</p><label>Caption<textarea value={caption} onChange={e=>setCaption(e.target.value)} placeholder="Write the post caption…" rows={7}/></label><label>Proposed date and time<input type="datetime-local" value={date} onChange={e=>setDate(e.target.value)}/></label><button className="primary" onClick={create}>Create draft <Icon name="arrow"/></button>{error&&<div className="form-error">{error}</div>}</article><article className="panel approval-queue"><div className="panel-head"><div><span className="kicker">HUMAN APPROVAL</span><h2>Approval queue</h2></div><button onClick={refresh}>Refresh</button></div>{loading?<div className="empty-state">Loading workspace records…</div>:drafts.length===0?<div className="empty-state">No drafts are waiting. Create one to begin.</div>:<div className="approval-list">{drafts.map(d=><div className="approval-card" key={d.id}><div><span>{d.content_type||"Post"}</span><time>{d.proposed_at?new Date(d.proposed_at).toLocaleString():"Date not chosen"}</time></div><p>{d.caption}</p><footer><button className="reject" onClick={()=>decide(d.id,"rejected")}>Reject</button><button className="approve" onClick={()=>decide(d.id,"approved")}>Approve draft</button></footer></div>)}</div>}</article></section>
 }
 
 type ChatMessage = { role: "assistant" | "user"; content: string; activity?: Array<{ tool?: string; kind?: string }> };

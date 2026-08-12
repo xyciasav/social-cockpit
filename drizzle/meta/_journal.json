@@ -15,6 +15,13 @@
       "when": 1786502984164,
       "tag": "0001_loose_lady_deathstrike",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1786505744632,
+      "tag": "0002_known_shockwave",
+      "breakpoints": true
     }
   ]
 }

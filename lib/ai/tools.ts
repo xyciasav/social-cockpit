@@ -39,19 +39,4 @@ export function assertToolCall(name: string, raw: unknown, context: ToolContext)
   return { tool, args, workspaceId: context.workspaceId };
 }
 
-export function executeDemoTool(name: string, args: Record<string, unknown>, context: ToolContext) {
-  assertToolCall(name, args, context);
-  const results: Record<string, unknown> = {
-    get_upcoming_events: { events: [{ id: "evt_fall", name: "Fall Community Night", date: "2026-10-24", campaignId: "cmp_fall" }] },
-    get_content_calendar: { posts: [{ id: "draft_1", date: "2026-08-18T18:30:00-07:00", status: "draft", topic: "Volunteer spotlight" }], openSlots: ["Tuesday 6:30 PM", "Thursday 7:00 PM", "Saturday 10:00 AM"] },
-    get_pending_approvals: { count: 3, drafts: ["Volunteer spotlight", "Festival countdown", "Know before you go"] },
-    get_performance_insights: { dateRange: `${args.days || 90} days`, insights: [{ finding: "Photo posts generated 31% higher median engagement than flyers on Instagram.", samples: { photos: 42, flyers: 19 }, confidence: "high" }, { finding: "Tuesday evening posts generated 24% higher median reach than weekday mornings.", sampleSize: 38, confidence: "medium" }] },
-    find_content_gaps: { gaps: [{ day: "Tuesday", time: "6:30 PM", reason: "open high-performing slot" }, { day: "Thursday", time: "7:00 PM", reason: "no event content scheduled" }, { day: "Saturday", time: "10:00 AM", reason: "underrepresented volunteer content" }] },
-    create_post_drafts: { created: Number(args.count), status: "pending_approval", ids: Array.from({ length: Number(args.count) }, (_, i) => `draft_ai_${Date.now()}_${i}`), publishingAttempted: false },
-    update_post_draft: { id: args.postId, status: "pending_approval", updated: true },
-    reschedule_post_draft: { id: args.postId, proposedAt: args.proposedAt, status: "pending_approval", scheduled: false },
-  };
-  return results[name];
-}
-
 export const SYSTEM_POLICY = `You are Social Cockpit's workspace-scoped social media manager. Use tools to inspect real application data. Never invent analytics. Cite sample size, date range, and confidence when available. You may create or modify drafts only. You can never approve, schedule, or publish. All created content must remain pending human approval. Never request or expose API keys. Current workspace data is the only authorized scope.`;
