@@ -4,7 +4,7 @@ from pathlib import Path
 from flask import Flask, jsonify, render_template, request
 import requests
 
-VERSION="1.0.0"; ROOT=Path(__file__).parent; DATA=Path(os.getenv("DATA_DIR",ROOT/"data")); UPLOADS=DATA/"uploads"; DB=DATA/"social-cockpit.db"
+VERSION="1.0.1"; ROOT=Path(__file__).parent; DATA=Path(os.getenv("DATA_DIR",ROOT/"data")); UPLOADS=DATA/"uploads"; DB=DATA/"social-cockpit.db"
 DATA.mkdir(exist_ok=True);UPLOADS.mkdir(exist_ok=True)
 app=Flask(__name__);app.config["MAX_CONTENT_LENGTH"]=25*1024*1024
 def db(): c=sqlite3.connect(DB);c.row_factory=sqlite3.Row;return c
@@ -12,9 +12,11 @@ def init():
  c=db();c.executescript("""
  CREATE TABLE IF NOT EXISTS library(id TEXT PRIMARY KEY,category TEXT NOT NULL,title TEXT NOT NULL,details TEXT,url TEXT,filename TEXT,created_at TEXT NOT NULL);
  CREATE TABLE IF NOT EXISTS tones(id TEXT PRIMARY KEY,name TEXT NOT NULL,prompt TEXT NOT NULL);
- CREATE TABLE IF NOT EXISTS settings(id INTEGER PRIMARY KEY CHECK(id=1),lm_url TEXT NOT NULL,lm_model TEXT NOT NULL,temperature REAL NOT NULL,max_tokens INTEGER NOT NULL,buffer_token TEXT,buffer_channel TEXT);
+ CREATE TABLE IF NOT EXISTS settings(id INTEGER PRIMARY KEY CHECK(id=1),lm_url TEXT NOT NULL,lm_model TEXT NOT NULL,temperature REAL NOT NULL,max_tokens INTEGER NOT NULL,buffer_token TEXT,buffer_channel TEXT,lm_token TEXT DEFAULT '');
  CREATE TABLE IF NOT EXISTS drafts(id TEXT PRIMARY KEY,caption TEXT NOT NULL,scheduled_at TEXT NOT NULL,status TEXT NOT NULL,tone TEXT,subject TEXT,buffer_id TEXT,created_at TEXT NOT NULL);
- """);c.execute("INSERT OR IGNORE INTO settings VALUES(1,?,?,?,?,?,?)",("http://host.docker.internal:1234","qwen",0.4,2400,"",""));
+ """)
+ if "lm_token" not in [x[1] for x in c.execute("PRAGMA table_info(settings)").fetchall()]:c.execute("ALTER TABLE settings ADD COLUMN lm_token TEXT DEFAULT ''")
+ c.execute("INSERT OR IGNORE INTO settings(id,lm_url,lm_model,temperature,max_tokens,buffer_token,buffer_channel,lm_token) VALUES(1,?,?,?,?,?,?,?)",("http://host.docker.internal:1234","qwen",0.4,2400,"","",""));
  c.execute("INSERT OR IGNORE INTO tones VALUES(?,?,?)",("tone_conversational","Conversational","Natural, warm, direct, and human. Avoid corporate language."));c.commit();c.close()
 init()
 def rows(sql,args=()): c=db();r=[dict(x) for x in c.execute(sql,args).fetchall()];c.close();return r
@@ -22,14 +24,15 @@ def rows(sql,args=()): c=db();r=[dict(x) for x in c.execute(sql,args).fetchall()
 def home(): return render_template("index.html",version=VERSION)
 @app.get("/api/state")
 def state():
- s=rows("SELECT * FROM settings WHERE id=1")[0];s["buffer_token"]="" if not s["buffer_token"] else "configured"
+ s=rows("SELECT * FROM settings WHERE id=1")[0];s["buffer_token"]="" if not s["buffer_token"] else "configured";s["lm_token"]="" if not s["lm_token"] else "configured"
  return jsonify(version=VERSION,library=rows("SELECT * FROM library ORDER BY created_at DESC"),tones=rows("SELECT * FROM tones ORDER BY name"),drafts=rows("SELECT * FROM drafts WHERE status='pending' ORDER BY scheduled_at"),settings=s)
 @app.post("/api/library")
 def add_library():
  if request.content_type and "multipart" in request.content_type:
-  f=request.files.get("file");
-  if not f:return jsonify(error="Choose a file"),400
-  ident=str(uuid.uuid4());name=Path(f.filename or "upload").name;f.save(UPLOADS/f"{ident}-{name}");record=(ident,request.form.get("category","Media"),request.form.get("title") or name,"","",name,datetime.now(timezone.utc).isoformat())
+  f=request.files.get("file");ident=str(uuid.uuid4());name=None
+  if f and f.filename:name=Path(f.filename).name;f.save(UPLOADS/f"{ident}-{name}")
+  record=(ident,request.form.get("category","Information"),request.form.get("title","").strip(),request.form.get("details",""),request.form.get("url",""),name,datetime.now(timezone.utc).isoformat())
+  if not record[2]:return jsonify(error="Title is required"),400
  else:
   x=request.get_json(force=True);record=(str(uuid.uuid4()),x.get("category","Information"),x.get("title","" ).strip(),x.get("details",""),x.get("url",""),None,datetime.now(timezone.utc).isoformat())
   if not record[2]:return jsonify(error="Title is required"),400
@@ -45,8 +48,8 @@ def save_tone():
 def del_tone(ident): c=db();c.execute("DELETE FROM tones WHERE id=?",(ident,));c.commit();c.close();return jsonify(ok=True)
 @app.put("/api/settings")
 def settings():
- x=request.get_json(force=True);c=db();old=c.execute("SELECT * FROM settings WHERE id=1").fetchone();token=x.get("buffer_token","");token=old["buffer_token"] if token=="configured" else token
- c.execute("UPDATE settings SET lm_url=?,lm_model=?,temperature=?,max_tokens=?,buffer_token=?,buffer_channel=? WHERE id=1",(x["lm_url"].rstrip("/").removesuffix("/v1"),x["lm_model"],float(x["temperature"]),int(x["max_tokens"]),token,x.get("buffer_channel","")));c.commit();c.close();return jsonify(ok=True)
+ x=request.get_json(force=True);c=db();old=c.execute("SELECT * FROM settings WHERE id=1").fetchone();token=x.get("buffer_token","");token=old["buffer_token"] if token=="configured" else token;lm_token=x.get("lm_token","");lm_token=old["lm_token"] if lm_token=="configured" else lm_token
+ c.execute("UPDATE settings SET lm_url=?,lm_model=?,temperature=?,max_tokens=?,buffer_token=?,buffer_channel=?,lm_token=? WHERE id=1",(x["lm_url"].rstrip("/").removesuffix("/v1"),x["lm_model"],float(x["temperature"]),int(x["max_tokens"]),token,x.get("buffer_channel",""),lm_token));c.commit();c.close();return jsonify(ok=True)
 def extract_json(text):
  text=text.strip();text=text.removeprefix("```json").removeprefix("```").removesuffix("```").strip()
  try:return json.loads(text)
@@ -63,7 +66,7 @@ def generate():
  prompt={"posts":count,"subject":x.get("subject",""),"tone":tone,"additional_instructions":x.get("instructions",""),"selected_information":lib}
  payload={"model":s["lm_model"],"temperature":s["temperature"],"max_tokens":s["max_tokens"],"response_format":{"type":"json_object"},"messages":[{"role":"system","content":"Return JSON only as {\"posts\":[{\"caption\":\"complete caption\"}]}. Write exactly the requested count of distinct, finished social posts. Use only supplied facts."},{"role":"user","content":json.dumps(prompt)}]}
  try:
-  r=requests.post(s["lm_url"]+"/v1/chat/completions",json=payload,timeout=300);raw=r.text
+  headers={"Authorization":"Bearer "+s["lm_token"]} if s["lm_token"] else {};r=requests.post(s["lm_url"]+"/v1/chat/completions",headers=headers,json=payload,timeout=300);raw=r.text
   if not r.ok:return jsonify(error=f"LM Studio {r.status_code}: {raw[:500]}"),502
   outer=r.json();generated=extract_json(outer["choices"][0]["message"]["content"])["posts"]
   if len(generated)!=count:return jsonify(error=f"Qwen returned {len(generated)} posts; expected {count}. Try again."),422
@@ -84,7 +87,7 @@ def regenerate(ident):
  c=db();d=c.execute("SELECT * FROM drafts WHERE id=?",(ident,)).fetchone();s=c.execute("SELECT * FROM settings WHERE id=1").fetchone();c.close()
  if not d:return jsonify(error="Draft not found"),404
  try:
-  r=requests.post(s["lm_url"]+"/v1/chat/completions",json={"model":s["lm_model"],"temperature":s["temperature"],"max_tokens":s["max_tokens"],"messages":[{"role":"system","content":"Rewrite this social post. Return only the revised caption."},{"role":"user","content":d["caption"]+"\nInstructions: "+(request.json.get("instructions","") if request.is_json else "")} ]},timeout=300);r.raise_for_status();caption=r.json()["choices"][0]["message"]["content"].strip();c=db();c.execute("UPDATE drafts SET caption=? WHERE id=?",(caption,ident));c.commit();c.close();return jsonify(ok=True)
+  headers={"Authorization":"Bearer "+s["lm_token"]} if s["lm_token"] else {};r=requests.post(s["lm_url"]+"/v1/chat/completions",headers=headers,json={"model":s["lm_model"],"temperature":s["temperature"],"max_tokens":s["max_tokens"],"messages":[{"role":"system","content":"Rewrite this social post. Return only the revised caption."},{"role":"user","content":d["caption"]+"\nInstructions: "+(request.json.get("instructions","") if request.is_json else "")} ]},timeout=300);r.raise_for_status();caption=r.json()["choices"][0]["message"]["content"].strip();c=db();c.execute("UPDATE drafts SET caption=? WHERE id=?",(caption,ident));c.commit();c.close();return jsonify(ok=True)
  except Exception as e:return jsonify(error=str(e)),502
 @app.post("/api/drafts/<ident>/approve")
 def approve(ident):
