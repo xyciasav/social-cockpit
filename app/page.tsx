@@ -1,0 +1,99 @@
+"use client";
+
+import { useMemo, useRef, useState } from "react";
+
+type Tab = "Overview" | "Campaigns" | "Recommendations" | "Imports";
+const tabs: Tab[] = ["Overview", "Campaigns", "Recommendations", "Imports"];
+
+const posts = [
+  { title: "Neighbors make the night", platform: "Instagram", type: "Community story", reach: 8240, engagement: 9.8, delta: 122, tone: "Conversational", media: "Photo", date: "Aug 8" },
+  { title: "3 days until Riverlight", platform: "Instagram", type: "Countdown", reach: 6790, engagement: 8.4, delta: 78, tone: "Excited", media: "Video", date: "Aug 6" },
+  { title: "Everything to know before Saturday", platform: "Facebook", type: "Event information", reach: 5140, engagement: 5.2, delta: 31, tone: "Informational", media: "Graphic", date: "Aug 5" },
+  { title: "Volunteer call: welcome crew", platform: "Facebook", type: "Volunteer", reach: 2380, engagement: 3.1, delta: -18, tone: "Urgent", media: "Flyer", date: "Aug 2" },
+];
+
+const hourly = [22, 31, 26, 42, 54, 49, 72, 68, 86, 78, 96, 90];
+
+function Icon({ name }: { name: string }) {
+  const paths: Record<string, string> = {
+    overview: "M3 3h7v7H3zM14 3h7v4h-7zM14 11h7v10h-7zM3 14h7v7H3z",
+    campaign: "M4 13V5a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v8M3 21h18M7 17h10",
+    spark: "m12 3-1.7 5.3L5 10l5.3 1.7L12 17l1.7-5.3L19 10l-5.3-1.7z",
+    import: "M12 3v12m0 0 4-4m-4 4-4-4M5 21h14",
+    arrow: "M5 12h14m-5-5 5 5-5 5",
+    chevron: "m9 18 6-6-6-6",
+  };
+  return <svg viewBox="0 0 24 24" aria-hidden="true"><path d={paths[name]} /></svg>;
+}
+
+function Sparkline({ values = hourly }: { values?: number[] }) {
+  const pts = values.map((v, i) => `${(i / (values.length - 1)) * 100},${42 - (v / 100) * 38}`).join(" ");
+  return <svg className="sparkline" viewBox="0 0 100 44" preserveAspectRatio="none"><defs><linearGradient id="fill" x1="0" y1="0" x2="0" y2="1"><stop stopColor="#c8ff5a" stopOpacity=".22"/><stop offset="1" stopColor="#c8ff5a" stopOpacity="0"/></linearGradient></defs><polygon points={`0,44 ${pts} 100,44`} fill="url(#fill)"/><polyline points={pts} fill="none" stroke="#c8ff5a" strokeWidth="2" vectorEffect="non-scaling-stroke"/></svg>;
+}
+
+export default function Home() {
+  const [tab, setTab] = useState<Tab>("Overview");
+  const [range, setRange] = useState("Last 30 days");
+  const [optimize, setOptimize] = useState(true);
+  const [file, setFile] = useState<string>("");
+  const [headers, setHeaders] = useState<string[]>([]);
+  const [rows, setRows] = useState<string[][]>([]);
+  const input = useRef<HTMLInputElement>(null);
+  const importReady = rows.length > 0;
+
+  const detected = useMemo(() => headers.map(h => ({ source: h, target: detectField(h) })), [headers]);
+
+  async function loadFile(f?: File) {
+    if (!f) return;
+    const text = await f.text();
+    const lines = text.split(/\r?\n/).filter(Boolean).slice(0, 7);
+    const parsed = lines.map(line => line.split(/,(?=(?:[^\"]*\"[^\"]*\")*[^\"]*$)/).map(v => v.replace(/^\"|\"$/g, "").trim()));
+    setFile(f.name); setHeaders(parsed[0] || []); setRows(parsed.slice(1));
+  }
+
+  return <div className="app-shell">
+    <aside>
+      <div className="brand"><div className="brandmark">SC</div><div><strong>Social Cockpit</strong><span>Performance intelligence</span></div></div>
+      <nav aria-label="Main navigation">
+        {tabs.map((item, i) => <button key={item} className={tab === item ? "active" : ""} onClick={() => setTab(item)}><Icon name={["overview","campaign","spark","import"][i]} />{item}{item === "Recommendations" && <em>4</em>}</button>)}
+      </nav>
+      <div className="side-bottom"><div className="workspace-dot">RH</div><div><strong>Riverlight HQ</strong><span>3 accounts connected</span></div><Icon name="chevron" /></div>
+    </aside>
+
+    <main>
+      <header><div><span className="eyebrow">RIVERLIGHT HQ / ANALYTICS</span><h1>{tab}</h1></div><div className="header-actions"><label className="select">{range}<select value={range} onChange={e => setRange(e.target.value)}><option>Last 30 days</option><option>Last 90 days</option><option>This year</option></select></label><button className="primary" onClick={() => setTab("Imports")}>Import data <Icon name="arrow" /></button></div></header>
+
+      {tab === "Overview" && <Overview range={range} />}
+      {tab === "Campaigns" && <Campaigns />}
+      {tab === "Recommendations" && <Recommendations optimize={optimize} setOptimize={setOptimize} />}
+      {tab === "Imports" && <Imports file={file} headers={headers} rows={rows} detected={detected} input={input} loadFile={loadFile} importReady={importReady} />}
+    </main>
+  </div>;
+}
+
+function Overview({ range }: { range: string }) {
+  return <>
+    <section className="context-row"><div><span className="live-dot"/>Data current through Aug 10, 2026</div><div>Compared with previous period</div></section>
+    <section className="metrics">
+      <Metric label="TOTAL REACH" value="84,290" change="+18.4%" note="13,102 more people" />
+      <Metric label="IMPRESSIONS" value="126.8K" change="+12.7%" note="1.50× frequency" />
+      <Metric label="ENGAGEMENT" value="6,482" change="+24.1%" note="7.7% rate" />
+      <Metric label="LINK CLICKS" value="1,204" change="+8.6%" note="1.43% of reach" />
+    </section>
+    <section className="grid-main">
+      <article className="panel performance"><div className="panel-head"><div><span className="kicker">PERFORMANCE OVER TIME</span><h2>Reach & engagement</h2></div><div className="legend"><i/> Reach <i className="purple"/> Engagement</div></div><div className="chart-labels"><span>12K</span><span>8K</span><span>4K</span><span>0</span></div><div className="big-chart"><Sparkline values={[14,21,18,32,29,45,42,58,51,74,68,88]} /><div className="purple-line"/></div><div className="x-axis"><span>Jul 12</span><span>Jul 18</span><span>Jul 24</span><span>Jul 30</span><span>Aug 5</span><span>Aug 10</span></div></article>
+      <article className="panel pulse"><span className="kicker">ACCOUNT PULSE</span><h2>Audience growth</h2><div className="audience"><strong>+386</strong><span>net new followers</span></div><Sparkline values={[18,22,29,27,39,44,42,57,62,70,74,88]} /><div className="account-row"><span className="insta">◎</span><div><strong>Instagram</strong><span>8,426 followers</span></div><b>+4.2%</b></div><div className="account-row"><span className="fb">f</span><div><strong>Facebook</strong><span>12,180 followers</span></div><b>+1.8%</b></div></article>
+    </section>
+    <section className="panel posts"><div className="panel-head"><div><span className="kicker">CONTENT PERFORMANCE</span><h2>What landed — and what didn’t</h2></div><button>View all posts <Icon name="arrow" /></button></div><div className="table"><div className="tr th"><span>POST</span><span>TYPE</span><span>REACH</span><span>ENG. RATE</span><span>VS. BASELINE</span></div>{posts.map((p,i) => <div className="tr" key={p.title}><span className="post-title"><b>{i+1}</b><span><strong>{p.title}</strong><small>{p.platform} · {p.date} · {p.media}</small></span></span><span><mark>{p.type}</mark></span><span>{p.reach.toLocaleString()}</span><span>{p.engagement}%</span><span className={p.delta > 0 ? "positive" : "negative"}>{p.delta > 0 ? "+" : ""}{p.delta}%</span></div>)}</div></section>
+  </>;
+}
+
+function Metric({label,value,change,note}:{label:string,value:string,change:string,note:string}) { return <article className="metric"><div><span>{label}</span><b>{value}</b></div><Sparkline values={[20,18,30,26,42,38,53,50,66,61,78,86]} /><footer><strong>{change}</strong><span>{note}</span></footer></article> }
+
+function Campaigns() { return <section className="campaign-layout"><article className="hero-card"><span className="status-pill">ACTIVE CAMPAIGN</span><h2>Riverlight Summer Festival</h2><p>July 18 – August 17 · 14 published posts · 3 scheduled</p><div className="campaign-stats"><div><span>TOTAL REACH</span><strong>48,320</strong><small>+42% vs campaign baseline</small></div><div><span>ENGAGEMENT</span><strong>4,108</strong><small>8.5% average rate</small></div><div><span>LINK CLICKS</span><strong>842</strong><small>1.74% click rate</small></div></div></article><article className="panel breakdown"><span className="kicker">CAMPAIGN SIGNALS</span><h2>What is working</h2>{[["Best day","Tuesday","+63% reach"],["Best time","6–8 PM","9.4% engagement"],["Best format","Event photos","1.7× median"],["Best CTA","Comment","12.1% engagement"]].map(x=><div className="signal" key={x[0]}><span>{x[0]}</span><strong>{x[1]}</strong><b>{x[2]}</b></div>)}</article><article className="panel wide"><span className="kicker">CAMPAIGN TIMELINE</span><h2>Momentum by phase</h2><div className="phase-bars"><div><span>Awareness</span><i style={{width:"43%"}}/><b>21.2K</b></div><div><span>Consideration</span><i style={{width:"71%"}}/><b>35.4K</b></div><div><span>Final 72 hours</span><i style={{width:"96%"}}/><b>48.3K</b></div></div></article></section> }
+
+function Recommendations({optimize,setOptimize}:{optimize:boolean,setOptimize:(x:boolean)=>void}) { const recs=[{title:"Lead with real event photos on Instagram",body:"Photo posts reached 1.7× the account median while designed flyers reached 0.8×.",sample:"34 posts",confidence:"High confidence"},{title:"Schedule Tuesday and Thursday evenings",body:"Posts published from 6–8 PM produced 41% more engagement than the account’s other weekday posts.",sample:"52 posts · last 90 days",confidence:"High confidence"},{title:"Use countdowns inside the final 72 hours",body:"Countdown content produced an 8.9% engagement rate near the event, compared with 5.1% earlier.",sample:"18 posts",confidence:"Medium confidence"},{title:"Keep Instagram captions between 80–150 words",body:"This range outperformed longer captions by 29% on engagement rate after normalizing for audience size.",sample:"67 posts",confidence:"High confidence"}]; return <><section className="optimization"><div><span className="kicker">CAMPAIGN GENERATION</span><h2>Optimize using historical performance</h2><p>Use proven patterns as recommendations when choosing timing, format, caption length, and CTA.</p></div><button className={`toggle ${optimize?"on":""}`} onClick={()=>setOptimize(!optimize)} aria-label="Toggle historical optimization"><i/></button></section><section className="recommend-grid">{recs.map((r,i)=><article className="recommend" key={r.title}><div className="rec-num">0{i+1}</div><span className="confidence">{r.confidence}</span><h2>{r.title}</h2><p>{r.body}</p><footer><span>Evidence</span><strong>{r.sample}</strong><button>View analysis <Icon name="arrow"/></button></footer></article>)}</section></> }
+
+function Imports({file,headers,rows,detected,input,loadFile,importReady}:{file:string,headers:string[],rows:string[][],detected:{source:string,target:string}[],input:React.RefObject<HTMLInputElement|null>,loadFile:(f?:File)=>void,importReady:boolean}) { return <section className="import-layout"><article className="panel upload"><span className="kicker">HISTORICAL DATA IMPORT</span><h2>Bring your performance history with you</h2><p>Upload a Buffer, Meta Business Suite, Facebook, Instagram, CSV, or Excel export. We’ll detect its shape before anything is saved.</p><div className={`dropzone ${file?"loaded":""}`} onClick={()=>input.current?.click()} onDragOver={e=>e.preventDefault()} onDrop={e=>{e.preventDefault();loadFile(e.dataTransfer.files[0])}}><input ref={input} type="file" accept=".csv,.xlsx,.xls" onChange={e=>loadFile(e.target.files?.[0])}/><div className="upload-icon">↓</div><strong>{file || "Drop an export here"}</strong><span>{file ? `${rows.length} preview rows detected` : "or choose a CSV / XLSX file"}</span></div><div className="privacy"><b>Local source of truth</b><span>Imported records and raw source files remain owned by your workspace.</span></div></article><article className="panel mapping"><div className="panel-head"><div><span className="kicker">FORMAT DETECTION</span><h2>{file ? "Review field mapping" : "Waiting for a file"}</h2></div>{file && <span className="status-pill">CSV DETECTED</span>}</div>{!file ? <div className="empty-state">Column mappings and matching confidence will appear here before import.</div> : <>{detected.slice(0,6).map(d=><div className="map-row" key={d.source}><code>{d.source}</code><span>→</span><strong>{d.target}</strong></div>)}<button className="primary full">Continue to matching <Icon name="arrow"/></button></>}</article>{importReady && <article className="panel preview wide"><div className="panel-head"><div><span className="kicker">PREVIEW · NOTHING IMPORTED YET</span><h2>First {rows.length} records</h2></div><div className="match-summary"><span><i className="match"/> {Math.max(0,rows.length-1)} matched</span><span><i className="review"/> 1 needs review</span><span><i className="dupe"/> 0 duplicates</span></div></div><div className="preview-scroll"><table><thead><tr>{headers.slice(0,6).map(h=><th key={h}>{h}</th>)}</tr></thead><tbody>{rows.map((r,i)=><tr key={i}>{r.slice(0,6).map((v,j)=><td key={j}>{v || "—"}</td>)}</tr>)}</tbody></table></div></article>}</section> }
+
+function detectField(value:string) { const v=value.toLowerCase().replace(/[^a-z0-9]/g,""); if(v.includes("caption")||v.includes("description")||v==="text")return "Post caption"; if(v.includes("date")||v.includes("published"))return "Published at"; if(v.includes("platform")||v.includes("network"))return "Platform"; if(v.includes("reach"))return "Reach"; if(v.includes("impression"))return "Impressions"; if(v.includes("click"))return "Link clicks"; if(v.includes("comment"))return "Comments"; if(v.includes("share"))return "Shares"; if(v.includes("like")||v.includes("reaction"))return "Reactions"; return "Custom metric"; }
