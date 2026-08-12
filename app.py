@@ -4,7 +4,7 @@ from pathlib import Path
 from flask import Flask, jsonify, render_template, request, send_file
 import requests
 
-VERSION="1.8.0"; ROOT=Path(__file__).parent; DATA=Path(os.getenv("DATA_DIR",ROOT/"data")); UPLOADS=DATA/"uploads"; DB=DATA/"social-cockpit.db"
+VERSION="1.9.0"; ROOT=Path(__file__).parent; DATA=Path(os.getenv("DATA_DIR",ROOT/"data")); UPLOADS=DATA/"uploads"; DB=DATA/"social-cockpit.db"
 DATA.mkdir(exist_ok=True);UPLOADS.mkdir(exist_ok=True)
 app=Flask(__name__);app.config["MAX_CONTENT_LENGTH"]=25*1024*1024
 def db(): c=sqlite3.connect(DB);c.row_factory=sqlite3.Row;return c
@@ -25,6 +25,8 @@ def init():
  if "instagram_type" not in draft_cols:c.execute("ALTER TABLE drafts ADD COLUMN instagram_type TEXT DEFAULT 'post'")
  if "facebook_type" not in draft_cols:c.execute("ALTER TABLE drafts ADD COLUMN facebook_type TEXT DEFAULT 'post'")
  if "schedule_mode" not in draft_cols:c.execute("ALTER TABLE drafts ADD COLUMN schedule_mode TEXT DEFAULT 'custom'")
+ if "information_json" not in draft_cols:c.execute("ALTER TABLE drafts ADD COLUMN information_json TEXT DEFAULT '[]'")
+ if "instructions" not in draft_cols:c.execute("ALTER TABLE drafts ADD COLUMN instructions TEXT DEFAULT ''")
  library_cols=[x[1] for x in c.execute("PRAGMA table_info(library)").fetchall()]
  if "image_url" not in library_cols:c.execute("ALTER TABLE library ADD COLUMN image_url TEXT DEFAULT ''")
  for column in ("event_date","start_time","end_time","location"):
@@ -129,7 +131,7 @@ def generate():
    queued.extend((str(p.get("caption","")).strip(),topic) for p in generated if str(p.get("caption","")).strip())
   c=db();created=[];total=len(queued)
   for i,(caption,topic) in enumerate(queued):
-   when=start.timestamp()+(0 if total==1 else span*i/(total-1));scheduled=datetime.fromtimestamp(when,timezone.utc).isoformat();ident=str(uuid.uuid4());c.execute("INSERT INTO drafts(id,caption,scheduled_at,status,tone,subject,buffer_id,created_at,platforms,media_id,instagram_type,facebook_type,schedule_mode) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",(ident,caption,scheduled,"pending",tone,topic["subject"],None,datetime.now(timezone.utc).isoformat(),json.dumps(platforms),topic["media_id"],instagram_type,facebook_type,schedule_mode));created.append(ident)
+   when=start.timestamp()+(0 if total==1 else span*i/(total-1));scheduled=datetime.fromtimestamp(when,timezone.utc).isoformat();ident=str(uuid.uuid4());c.execute("INSERT INTO drafts(id,caption,scheduled_at,status,tone,subject,buffer_id,created_at,platforms,media_id,instagram_type,facebook_type,schedule_mode,information_json,instructions) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",(ident,caption,scheduled,"pending",tone,topic["subject"],None,datetime.now(timezone.utc).isoformat(),json.dumps(platforms),topic["media_id"],instagram_type,facebook_type,schedule_mode,json.dumps(topic["information"]),x.get("instructions","")));created.append(ident)
   c.commit();c.close();return jsonify(created=len(created))
  except requests.RequestException as e:return jsonify(error=f"Cannot reach LM Studio: {e}"),502
  except (KeyError,ValueError,json.JSONDecodeError) as e:return jsonify(error=f"Qwen response could not be parsed: {e}"),422
@@ -141,12 +143,17 @@ def reject(ident): c=db();c.execute("UPDATE drafts SET status='rejected' WHERE i
 def ready(ident):
  c=db();changed=c.execute("UPDATE drafts SET status='ready' WHERE id=? AND status='pending'",(ident,)).rowcount;c.commit();c.close()
  return jsonify(ok=True) if changed else (jsonify(error="Draft not found or already approved"),404)
+@app.post("/api/drafts/<ident>/unready")
+def unready(ident):
+ c=db();changed=c.execute("UPDATE drafts SET status='pending' WHERE id=? AND status='ready'",(ident,)).rowcount;c.commit();c.close()
+ return jsonify(ok=True) if changed else (jsonify(error="Approved draft not found"),404)
 @app.post("/api/drafts/<ident>/regenerate")
 def regenerate(ident):
- c=db();d=c.execute("SELECT * FROM drafts WHERE id=?",(ident,)).fetchone();s=c.execute("SELECT * FROM settings WHERE id=1").fetchone();c.close()
+ c=db();d=c.execute("SELECT * FROM drafts WHERE id=?",(ident,)).fetchone();s=c.execute("SELECT * FROM settings WHERE id=1").fetchone();fallback_information=[dict(x) for x in c.execute("SELECT * FROM library WHERE title=?",(d["subject"],)).fetchall()] if d else [];c.close()
  if not d:return jsonify(error="Draft not found"),404
  try:
-  headers={"Authorization":"Bearer "+s["lm_token"]} if s["lm_token"] else {};r=requests.post(s["lm_url"]+"/v1/chat/completions",headers=headers,json={"model":s["lm_model"],"temperature":s["temperature"],"max_tokens":s["max_tokens"],"messages":[{"role":"system","content":"Rewrite this social post with short paragraphs separated by blank lines, the call to action on its own line, and hashtags on a final separate line. Return only the revised caption."},{"role":"user","content":d["caption"]+"\nInstructions: "+(request.json.get("instructions","") if request.is_json else "")} ]},timeout=300);r.raise_for_status();caption=r.json()["choices"][0]["message"]["content"].strip();c=db();c.execute("UPDATE drafts SET caption=? WHERE id=?",(caption,ident));c.commit();c.close();return jsonify(ok=True)
+  saved_information=json.loads(d["information_json"] or "[]") or fallback_information;extra=(request.json.get("instructions","") if request.is_json else "").strip();prompt={"posts":1,"subject":d["subject"],"tone":d["tone"],"platforms":json.loads(d["platforms"] or '["facebook"]'),"additional_instructions":"\n".join(filter(None,[d["instructions"] or "",extra])),"selected_information":saved_information,"previous_caption":d["caption"]};schema={"name":"social_post","strict":True,"schema":{"type":"object","properties":{"caption":{"type":"string"}},"required":["caption"],"additionalProperties":False}}
+  headers={"Authorization":"Bearer "+s["lm_token"]} if s["lm_token"] else {};r=requests.post(s["lm_url"]+"/v1/chat/completions",headers=headers,json={"model":s["lm_model"],"temperature":s["temperature"],"max_tokens":s["max_tokens"],"response_format":{"type":"json_schema","json_schema":schema},"messages":[{"role":"system","content":"Create one fresh, finished social post about the supplied subject. Use only the supplied facts, preserve important dates, times, locations, links, and calls to action, but do not merely paraphrase the previous caption. Use short paragraphs separated by blank lines, a separate call to action, and hashtags on a final line."},{"role":"user","content":json.dumps(prompt)}]},timeout=300);r.raise_for_status();caption=extract_json(r.json()["choices"][0]["message"]["content"])["caption"].strip();c=db();c.execute("UPDATE drafts SET caption=? WHERE id=?",(caption,ident));c.commit();c.close();return jsonify(ok=True)
  except Exception as e:return jsonify(error=str(e)),502
 @app.post("/api/drafts/<ident>/approve")
 def approve(ident):
