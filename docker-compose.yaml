@@ -1,6 +1,6 @@
 services:
   social-cockpit:
-    image: ghcr.io/xyciasav/social-cockpit:${APP_VERSION:-1.2.2}
+    image: ghcr.io/xyciasav/social-cockpit:${APP_VERSION:-1.3.0}
     container_name: social-cockpit
     restart: unless-stopped
     ports:
