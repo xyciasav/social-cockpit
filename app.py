@@ -4,7 +4,7 @@ from pathlib import Path
 from flask import Flask, jsonify, render_template, request, send_file
 import requests
 
-VERSION="1.1.1"; ROOT=Path(__file__).parent; DATA=Path(os.getenv("DATA_DIR",ROOT/"data")); UPLOADS=DATA/"uploads"; DB=DATA/"social-cockpit.db"
+VERSION="1.2.0"; ROOT=Path(__file__).parent; DATA=Path(os.getenv("DATA_DIR",ROOT/"data")); UPLOADS=DATA/"uploads"; DB=DATA/"social-cockpit.db"
 DATA.mkdir(exist_ok=True);UPLOADS.mkdir(exist_ok=True)
 app=Flask(__name__);app.config["MAX_CONTENT_LENGTH"]=25*1024*1024
 def db(): c=sqlite3.connect(DB);c.row_factory=sqlite3.Row;return c
@@ -22,6 +22,8 @@ def init():
  draft_cols=[x[1] for x in c.execute("PRAGMA table_info(drafts)").fetchall()]
  if "platforms" not in draft_cols:c.execute("ALTER TABLE drafts ADD COLUMN platforms TEXT DEFAULT 'facebook'")
  if "media_id" not in draft_cols:c.execute("ALTER TABLE drafts ADD COLUMN media_id TEXT DEFAULT ''")
+ library_cols=[x[1] for x in c.execute("PRAGMA table_info(library)").fetchall()]
+ if "image_url" not in library_cols:c.execute("ALTER TABLE library ADD COLUMN image_url TEXT DEFAULT ''")
  c.execute("INSERT OR IGNORE INTO settings(id,lm_url,lm_model,temperature,max_tokens,buffer_token,buffer_channel,lm_token) VALUES(1,?,?,?,?,?,?,?)",("http://host.docker.internal:1234","qwen",0.4,2400,"","",""));
  c.execute("UPDATE settings SET facebook_channel=buffer_channel WHERE (facebook_channel IS NULL OR facebook_channel='') AND buffer_channel IS NOT NULL AND buffer_channel!=''")
  c.execute("INSERT OR IGNORE INTO tones VALUES(?,?,?)",("tone_conversational","Conversational","Natural, warm, direct, and human. Avoid corporate language."));c.commit();c.close()
@@ -43,12 +45,12 @@ def add_library():
  if request.content_type and "multipart" in request.content_type:
   f=request.files.get("file");ident=str(uuid.uuid4());name=None
   if f and f.filename:name=Path(f.filename).name;f.save(UPLOADS/f"{ident}-{name}")
-  record=(ident,request.form.get("category","Information"),request.form.get("title","").strip(),request.form.get("details",""),request.form.get("url",""),name,datetime.now(timezone.utc).isoformat())
+  record=(ident,request.form.get("category","Information"),request.form.get("title","").strip(),request.form.get("details",""),request.form.get("url",""),name,datetime.now(timezone.utc).isoformat(),request.form.get("image_url","").strip())
   if not record[2]:return jsonify(error="Title is required"),400
  else:
-  x=request.get_json(force=True);record=(str(uuid.uuid4()),x.get("category","Information"),x.get("title","" ).strip(),x.get("details",""),x.get("url",""),None,datetime.now(timezone.utc).isoformat())
+  x=request.get_json(force=True);record=(str(uuid.uuid4()),x.get("category","Information"),x.get("title","" ).strip(),x.get("details",""),x.get("url",""),None,datetime.now(timezone.utc).isoformat(),x.get("image_url",""))
   if not record[2]:return jsonify(error="Title is required"),400
- c=db();c.execute("INSERT INTO library VALUES(?,?,?,?,?,?,?)",record);c.commit();c.close();return jsonify(ok=True)
+ c=db();c.execute("INSERT INTO library(id,category,title,details,url,filename,created_at,image_url) VALUES(?,?,?,?,?,?,?,?)",record);c.commit();c.close();return jsonify(ok=True)
 @app.delete("/api/library/<ident>")
 def del_library(ident): c=db();r=c.execute("SELECT filename FROM library WHERE id=?",(ident,)).fetchone();c.execute("DELETE FROM library WHERE id=?",(ident,));c.commit();c.close();return jsonify(ok=True)
 @app.post("/api/tones")
@@ -73,8 +75,8 @@ def extract_json(text):
 def generate():
  x=request.get_json(force=True);count=max(1,min(30,int(x.get("count",1))));selected=x.get("library_ids",[]);tone_id=x.get("tone_id");platforms=x.get("platforms",[])
  if not platforms:return jsonify(error="Choose Facebook, Instagram, or both"),400
- lib=rows(f"SELECT id,category,title,details,url,filename FROM library WHERE id IN ({','.join('?'*len(selected))})",selected) if selected else []
- media_id=x.get("media_id","");media_rows=rows("SELECT id,title,filename FROM library WHERE id=?",(media_id,)) if media_id else [];media_item=media_rows[0] if media_rows and (media_rows[0].get("filename") or "").lower().endswith((".jpg",".jpeg",".png",".webp",".gif")) else None
+ lib=rows(f"SELECT id,category,title,details,url,filename,image_url FROM library WHERE id IN ({','.join('?'*len(selected))})",selected) if selected else []
+ media_id=x.get("media_id","");media_rows=rows("SELECT id,title,filename,image_url FROM library WHERE id=?",(media_id,)) if media_id else [];media_item=media_rows[0] if media_rows and ((media_rows[0].get("filename") or "").lower().endswith((".jpg",".jpeg",".png",".webp",".gif")) or (media_rows[0].get("image_url") or "").startswith(("http://","https://"))) else None
  if "instagram" in platforms and not media_item:return jsonify(error="Instagram requires an image. Select information with an uploaded image or flyer."),400
  tone=rows("SELECT prompt FROM tones WHERE id=?",(tone_id,));tone=tone[0]["prompt"] if tone else "Clear and conversational"
  s=rows("SELECT * FROM settings WHERE id=1")[0];start=datetime.fromisoformat(x["start"]);end=datetime.fromisoformat(x.get("end") or x["start"]);span=(end-start).total_seconds()
@@ -121,8 +123,11 @@ def approve(ident):
  if missing:return jsonify(error="Configure Buffer channel ID for "+", ".join(missing)+" in Settings"),400
  media_url=""
  if d["media_id"]:
-  if not s["public_url"]:return jsonify(error="Set the Public app URL in Settings so Buffer can retrieve the image"),400
-  media_url=s["public_url"].rstrip("/")+"/media/"+d["media_id"]
+  item=c.execute("SELECT filename,image_url FROM library WHERE id=?",(d["media_id"],)).fetchone()
+  if item and item["image_url"]:media_url=item["image_url"]
+  elif item and item["filename"]:
+   if not s["public_url"]:return jsonify(error="This post uses an uploaded image. Set the Public HTTPS address in Settings so Buffer can retrieve it, or save a direct public image URL with the Information item."),400
+   media_url=s["public_url"].rstrip("/")+"/media/"+d["media_id"]
  if "instagram" in platforms and not media_url:return jsonify(error="Instagram requires an image"),400
  query="""mutation CreatePost($text:String!,$channel:ChannelId!,$due:DateTime!,$assets:[AssetInput!]!){createPost(input:{text:$text,channelId:$channel,schedulingType:automatic,mode:customScheduled,dueAt:$due,assets:$assets}){... on PostActionSuccess{post{id text dueAt}} ... on MutationError{message}}}"""
  post_ids=[]
