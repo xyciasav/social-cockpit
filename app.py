@@ -4,7 +4,7 @@ from pathlib import Path
 from flask import Flask, jsonify, render_template, request, send_file
 import requests
 
-VERSION="1.2.0"; ROOT=Path(__file__).parent; DATA=Path(os.getenv("DATA_DIR",ROOT/"data")); UPLOADS=DATA/"uploads"; DB=DATA/"social-cockpit.db"
+VERSION="1.2.1"; ROOT=Path(__file__).parent; DATA=Path(os.getenv("DATA_DIR",ROOT/"data")); UPLOADS=DATA/"uploads"; DB=DATA/"social-cockpit.db"
 DATA.mkdir(exist_ok=True);UPLOADS.mkdir(exist_ok=True)
 app=Flask(__name__);app.config["MAX_CONTENT_LENGTH"]=25*1024*1024
 def db(): c=sqlite3.connect(DB);c.row_factory=sqlite3.Row;return c
@@ -133,10 +133,17 @@ def approve(ident):
  post_ids=[]
  for platform in platforms:
   variables={"text":d["caption"],"channel":channels[platform],"due":d["scheduled_at"],"assets":[{"image":{"url":media_url}}] if media_url else []}
-  r=requests.post("https://api.buffer.com",headers={"Authorization":"Bearer "+s["buffer_token"]},json={"query":query,"variables":variables},timeout=60)
-  try:result=r.json();post=result.get("data",{}).get("createPost",{});error=post.get("message") or (result.get("errors") or [{}])[0].get("message")
-  except ValueError:return jsonify(error=f"Buffer returned {r.status_code}: {r.text[:300]}"),502
+  try:r=requests.post("https://api.buffer.com",headers={"Authorization":"Bearer "+s["buffer_token"]},json={"query":query,"variables":variables},timeout=60)
+  except requests.RequestException as e:return jsonify(error=f"Could not reach Buffer: {e}"),502
+  try:
+   result=r.json();data=result.get("data") or {};post=data.get("createPost") or {};errors=result.get("errors") or [];error=post.get("message") or (errors[0].get("message") if errors else None)
+  except (ValueError,AttributeError,IndexError):return jsonify(error=f"Buffer returned {r.status_code}: {r.text[:300]}"),502
+  if not r.ok and not error:error=f"Buffer returned HTTP {r.status_code}"
   if error:return jsonify(error=f"{platform.title()}: {error}"),502
   post_ids.append(post.get("post",{}).get("id"))
  c.execute("UPDATE drafts SET status='approved',buffer_id=? WHERE id=?",(json.dumps(post_ids),ident));c.commit();c.close();return jsonify(ok=True)
+@app.errorhandler(Exception)
+def unexpected_error(error):
+ app.logger.exception("Unhandled application error")
+ return jsonify(error=f"Server error: {error}"),500
 if __name__=="__main__":app.run(host="0.0.0.0",port=3000)
