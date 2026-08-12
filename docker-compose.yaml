@@ -7,7 +7,7 @@ services:
     container_name: social-cockpit
     restart: unless-stopped
     ports:
-      - "${SOCIAL_COCKPIT_PORT:-3000}:3000"
+      - "${SOCIAL_COCKPIT_PORT:-38427}:3000"
     environment:
       NODE_ENV: production
       LLM_BASE_URL: "${LLM_BASE_URL:-}"

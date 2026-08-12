@@ -26,7 +26,7 @@ Copy `.env.example` to `.env`, adjust the optional LLM provider settings, then r
 docker compose up -d --build
 ```
 
-Open `http://localhost:3000`. Change `SOCIAL_COCKPIT_PORT` if port 3000 is already in use. Without an LLM provider, the assistant uses safe demonstration mode.
+Open `http://localhost:38427`. Change `SOCIAL_COCKPIT_PORT` in `.env` if that high port is already in use. The container continues to use port 3000 internally; only the host-facing port is changed. Without an LLM provider, the assistant uses safe demonstration mode.
 
 ## Included Shape
 
