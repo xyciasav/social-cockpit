@@ -4,7 +4,7 @@ from pathlib import Path
 from flask import Flask, jsonify, render_template, request
 import requests
 
-VERSION="1.0.2"; ROOT=Path(__file__).parent; DATA=Path(os.getenv("DATA_DIR",ROOT/"data")); UPLOADS=DATA/"uploads"; DB=DATA/"social-cockpit.db"
+VERSION="1.0.3"; ROOT=Path(__file__).parent; DATA=Path(os.getenv("DATA_DIR",ROOT/"data")); UPLOADS=DATA/"uploads"; DB=DATA/"social-cockpit.db"
 DATA.mkdir(exist_ok=True);UPLOADS.mkdir(exist_ok=True)
 app=Flask(__name__);app.config["MAX_CONTENT_LENGTH"]=25*1024*1024
 def db(): c=sqlite3.connect(DB);c.row_factory=sqlite3.Row;return c
@@ -64,7 +64,8 @@ def generate():
  tone=rows("SELECT prompt FROM tones WHERE id=?",(tone_id,));tone=tone[0]["prompt"] if tone else "Clear and conversational"
  s=rows("SELECT * FROM settings WHERE id=1")[0];start=datetime.fromisoformat(x["start"]);end=datetime.fromisoformat(x.get("end") or x["start"]);span=(end-start).total_seconds()
  prompt={"posts":count,"subject":x.get("subject",""),"tone":tone,"additional_instructions":x.get("instructions",""),"selected_information":lib}
- payload={"model":s["lm_model"],"temperature":s["temperature"],"max_tokens":s["max_tokens"],"response_format":{"type":"json_object"},"messages":[{"role":"system","content":"Return JSON only as {\"posts\":[{\"caption\":\"complete caption\"}]}. Write exactly the requested count of distinct, finished social posts. Use only supplied facts."},{"role":"user","content":json.dumps(prompt)}]}
+ schema={"name":"social_posts","strict":True,"schema":{"type":"object","properties":{"posts":{"type":"array","items":{"type":"object","properties":{"caption":{"type":"string"}},"required":["caption"],"additionalProperties":False}}},"required":["posts"],"additionalProperties":False}}
+ payload={"model":s["lm_model"],"temperature":s["temperature"],"max_tokens":s["max_tokens"],"response_format":{"type":"json_schema","json_schema":schema},"messages":[{"role":"system","content":"Write exactly the requested count of distinct, finished social posts. Use only supplied facts."},{"role":"user","content":json.dumps(prompt)}]}
  try:
   headers={"Authorization":"Bearer "+s["lm_token"]} if s["lm_token"] else {};r=requests.post(s["lm_url"]+"/v1/chat/completions",headers=headers,json=payload,timeout=300);raw=r.text
   if not r.ok:return jsonify(error=f"LM Studio {r.status_code}: {raw[:500]}"),502
