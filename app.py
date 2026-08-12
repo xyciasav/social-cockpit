@@ -4,7 +4,7 @@ from pathlib import Path
 from flask import Flask, jsonify, render_template, request, send_file
 import requests
 
-VERSION="1.7.0"; ROOT=Path(__file__).parent; DATA=Path(os.getenv("DATA_DIR",ROOT/"data")); UPLOADS=DATA/"uploads"; DB=DATA/"social-cockpit.db"
+VERSION="1.8.0"; ROOT=Path(__file__).parent; DATA=Path(os.getenv("DATA_DIR",ROOT/"data")); UPLOADS=DATA/"uploads"; DB=DATA/"social-cockpit.db"
 DATA.mkdir(exist_ok=True);UPLOADS.mkdir(exist_ok=True)
 app=Flask(__name__);app.config["MAX_CONTENT_LENGTH"]=25*1024*1024
 def db(): c=sqlite3.connect(DB);c.row_factory=sqlite3.Row;return c
@@ -51,7 +51,7 @@ def media(ident):
 @app.get("/api/state")
 def state():
  s=rows("SELECT * FROM settings WHERE id=1")[0];s["buffer_token"]="" if not s["buffer_token"] else "configured";s["lm_token"]="" if not s["lm_token"] else "configured"
- return jsonify(version=VERSION,library=rows("SELECT * FROM library ORDER BY created_at DESC"),tones=rows("SELECT * FROM tones ORDER BY name"),drafts=rows("SELECT * FROM drafts WHERE status='pending' ORDER BY scheduled_at"),settings=s)
+ return jsonify(version=VERSION,library=rows("SELECT * FROM library ORDER BY created_at DESC"),tones=rows("SELECT * FROM tones ORDER BY name"),drafts=rows("SELECT * FROM drafts WHERE status IN ('pending','ready') ORDER BY scheduled_at"),settings=s)
 @app.post("/api/library")
 def add_library():
  if request.content_type and "multipart" in request.content_type:
@@ -134,9 +134,13 @@ def generate():
  except requests.RequestException as e:return jsonify(error=f"Cannot reach LM Studio: {e}"),502
  except (KeyError,ValueError,json.JSONDecodeError) as e:return jsonify(error=f"Qwen response could not be parsed: {e}"),422
 @app.put("/api/drafts/<ident>")
-def edit_draft(ident): x=request.get_json(force=True);c=db();c.execute("UPDATE drafts SET caption=?,scheduled_at=? WHERE id=? AND status='pending'",(x["caption"],x["scheduled_at"],ident));c.commit();c.close();return jsonify(ok=True)
+def edit_draft(ident): x=request.get_json(force=True);c=db();c.execute("UPDATE drafts SET caption=?,scheduled_at=? WHERE id=? AND status IN ('pending','ready')",(x["caption"],x["scheduled_at"],ident));c.commit();c.close();return jsonify(ok=True)
 @app.post("/api/drafts/<ident>/reject")
 def reject(ident): c=db();c.execute("UPDATE drafts SET status='rejected' WHERE id=?",(ident,));c.commit();c.close();return jsonify(ok=True)
+@app.post("/api/drafts/<ident>/ready")
+def ready(ident):
+ c=db();changed=c.execute("UPDATE drafts SET status='ready' WHERE id=? AND status='pending'",(ident,)).rowcount;c.commit();c.close()
+ return jsonify(ok=True) if changed else (jsonify(error="Draft not found or already approved"),404)
 @app.post("/api/drafts/<ident>/regenerate")
 def regenerate(ident):
  c=db();d=c.execute("SELECT * FROM drafts WHERE id=?",(ident,)).fetchone();s=c.execute("SELECT * FROM settings WHERE id=1").fetchone();c.close()
@@ -146,7 +150,7 @@ def regenerate(ident):
  except Exception as e:return jsonify(error=str(e)),502
 @app.post("/api/drafts/<ident>/approve")
 def approve(ident):
- c=db();d=c.execute("SELECT * FROM drafts WHERE id=? AND status='pending'",(ident,)).fetchone();s=c.execute("SELECT * FROM settings WHERE id=1").fetchone()
+ c=db();d=c.execute("SELECT * FROM drafts WHERE id=? AND status IN ('pending','ready')",(ident,)).fetchone();s=c.execute("SELECT * FROM settings WHERE id=1").fetchone()
  if not d:return jsonify(error="Draft not found"),404
  if not s["buffer_token"]:return jsonify(error="Configure the Buffer API key in Settings"),400
  platforms=json.loads(d["platforms"] or '["facebook"]');channels={"facebook":s["facebook_channel"] or s["buffer_channel"],"instagram":s["instagram_channel"]}
@@ -174,6 +178,15 @@ def approve(ident):
   if error:return jsonify(error=f"{platform.title()}: {error}"),502
   post_ids.append(post.get("post",{}).get("id"))
  c.execute("UPDATE drafts SET status='approved',buffer_id=? WHERE id=?",(json.dumps(post_ids),ident));c.commit();c.close();return jsonify(ok=True)
+@app.post("/api/drafts/send-ready")
+def send_ready():
+ ids=[x["id"] for x in rows("SELECT id FROM drafts WHERE status='ready' ORDER BY scheduled_at")];sent=[];failed=[]
+ if not ids:return jsonify(error="No approved posts are waiting to be sent"),400
+ for ident in ids:
+  result=approve(ident);response,status=(result if isinstance(result,tuple) else (result,result.status_code))
+  if status<400:sent.append(ident)
+  else:failed.append({"id":ident,"error":(response.get_json(silent=True) or {}).get("error","Unknown error")})
+ return jsonify(sent=len(sent),failed=failed)
 @app.errorhandler(Exception)
 def unexpected_error(error):
  app.logger.exception("Unhandled application error")

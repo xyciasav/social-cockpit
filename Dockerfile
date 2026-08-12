@@ -1,5 +1,5 @@
 FROM python:3.12-slim
-ARG APP_VERSION=1.7.0
+ARG APP_VERSION=1.8.0
 LABEL org.opencontainers.image.title="Social Cockpit" org.opencontainers.image.version=$APP_VERSION org.opencontainers.image.source="https://github.com/xyciasav/social-cockpit"
 WORKDIR /app
 COPY requirements.txt .
