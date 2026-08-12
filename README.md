@@ -20,13 +20,16 @@ This starter does not use `wrangler.jsonc`.
 
 ## Docker Compose
 
-Copy `.env.example` to `.env`, adjust the optional LLM provider settings, then run:
+1. In LM Studio, load your Qwen model, open **Local Server**, enable **Serve on Local Network**, and start the server on port `1234`.
+2. Copy `.env.example` to `.env`.
+3. Replace `LLM_MODEL=qwen` with the exact model identifier shown by LM Studio.
+4. Start Social Cockpit:
 
 ```bash
 docker compose up -d --build
 ```
 
-Open `http://localhost:38427`. Change `SOCIAL_COCKPIT_PORT` in `.env` if that high port is already in use. The container continues to use port 3000 internally; only the host-facing port is changed. Configure `LLM_BASE_URL` and `LLM_MODEL` to enable the assistant.
+Open `http://localhost:38427`. Ask Qwen to create posts; complete captions are saved into the approval queue. Change `SOCIAL_COCKPIT_PORT` in `.env` if that high port is already in use.
 
 This project is self-hosted only. Releases are pushed to GitHub for deployment with Docker Compose; it is not deployed through ChatGPT Sites.
 
