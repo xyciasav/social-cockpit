@@ -4,7 +4,7 @@ from pathlib import Path
 from flask import Flask, jsonify, render_template, request, send_file
 import requests
 
-VERSION="1.4.0"; ROOT=Path(__file__).parent; DATA=Path(os.getenv("DATA_DIR",ROOT/"data")); UPLOADS=DATA/"uploads"; DB=DATA/"social-cockpit.db"
+VERSION="1.5.0"; ROOT=Path(__file__).parent; DATA=Path(os.getenv("DATA_DIR",ROOT/"data")); UPLOADS=DATA/"uploads"; DB=DATA/"social-cockpit.db"
 DATA.mkdir(exist_ok=True);UPLOADS.mkdir(exist_ok=True)
 app=Flask(__name__);app.config["MAX_CONTENT_LENGTH"]=25*1024*1024
 def db(): c=sqlite3.connect(DB);c.row_factory=sqlite3.Row;return c
@@ -29,9 +29,11 @@ def init():
  if "image_url" not in library_cols:c.execute("ALTER TABLE library ADD COLUMN image_url TEXT DEFAULT ''")
  for column in ("event_date","start_time","end_time","location"):
   if column not in library_cols:c.execute(f"ALTER TABLE library ADD COLUMN {column} TEXT DEFAULT ''")
+ tone_cols=[x[1] for x in c.execute("PRAGMA table_info(tones)").fetchall()]
+ if "is_default" not in tone_cols:c.execute("ALTER TABLE tones ADD COLUMN is_default INTEGER DEFAULT 0")
  c.execute("INSERT OR IGNORE INTO settings(id,lm_url,lm_model,temperature,max_tokens,buffer_token,buffer_channel,lm_token) VALUES(1,?,?,?,?,?,?,?)",("http://host.docker.internal:1234","qwen",0.4,2400,"","",""));
  c.execute("UPDATE settings SET facebook_channel=buffer_channel WHERE (facebook_channel IS NULL OR facebook_channel='') AND buffer_channel IS NOT NULL AND buffer_channel!=''")
- c.execute("INSERT OR IGNORE INTO tones VALUES(?,?,?)",("tone_conversational","Conversational","Natural, warm, direct, and human. Avoid corporate language."));c.commit();c.close()
+ c.execute("INSERT OR IGNORE INTO tones(id,name,prompt,is_default) VALUES(?,?,?,?)",("tone_conversational","Conversational","Natural, warm, direct, and human. Avoid corporate language.",1));c.execute("UPDATE tones SET is_default=1 WHERE id=(SELECT id FROM tones ORDER BY name LIMIT 1) AND NOT EXISTS(SELECT 1 FROM tones WHERE is_default=1)");c.commit();c.close()
 init()
 def rows(sql,args=()): c=db();r=[dict(x) for x in c.execute(sql,args).fetchall()];c.close();return r
 @app.get("/")
@@ -71,9 +73,11 @@ def del_library(ident): c=db();r=c.execute("SELECT filename FROM library WHERE i
 def save_tone():
  x=request.get_json(force=True);ident=x.get("id") or str(uuid.uuid4());
  if not x.get("name") or not x.get("prompt"):return jsonify(error="Tone name and prompt are required"),400
- c=db();c.execute("INSERT INTO tones VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,prompt=excluded.prompt",(ident,x["name"],x["prompt"]));c.commit();c.close();return jsonify(ok=True)
+ c=db();is_default=1 if x.get("is_default") else 0
+ if is_default:c.execute("UPDATE tones SET is_default=0")
+ c.execute("INSERT INTO tones(id,name,prompt,is_default) VALUES(?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,prompt=excluded.prompt,is_default=excluded.is_default",(ident,x["name"],x["prompt"],is_default));c.commit();c.close();return jsonify(ok=True)
 @app.delete("/api/tones/<ident>")
-def del_tone(ident): c=db();c.execute("DELETE FROM tones WHERE id=?",(ident,));c.commit();c.close();return jsonify(ok=True)
+def del_tone(ident): c=db();c.execute("DELETE FROM tones WHERE id=?",(ident,));c.execute("UPDATE tones SET is_default=1 WHERE id=(SELECT id FROM tones ORDER BY name LIMIT 1) AND NOT EXISTS(SELECT 1 FROM tones WHERE is_default=1)");c.commit();c.close();return jsonify(ok=True)
 @app.put("/api/settings")
 def settings():
  x=request.get_json(force=True);c=db();old=c.execute("SELECT * FROM settings WHERE id=1").fetchone();token=x.get("buffer_token","");token=old["buffer_token"] if token=="configured" else token;lm_token=x.get("lm_token","");lm_token=old["lm_token"] if lm_token=="configured" else lm_token
