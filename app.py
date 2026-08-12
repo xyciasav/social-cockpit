@@ -4,7 +4,7 @@ from pathlib import Path
 from flask import Flask, jsonify, render_template, request, send_file
 import requests
 
-VERSION="1.3.0"; ROOT=Path(__file__).parent; DATA=Path(os.getenv("DATA_DIR",ROOT/"data")); UPLOADS=DATA/"uploads"; DB=DATA/"social-cockpit.db"
+VERSION="1.4.0"; ROOT=Path(__file__).parent; DATA=Path(os.getenv("DATA_DIR",ROOT/"data")); UPLOADS=DATA/"uploads"; DB=DATA/"social-cockpit.db"
 DATA.mkdir(exist_ok=True);UPLOADS.mkdir(exist_ok=True)
 app=Flask(__name__);app.config["MAX_CONTENT_LENGTH"]=25*1024*1024
 def db(): c=sqlite3.connect(DB);c.row_factory=sqlite3.Row;return c
@@ -24,8 +24,11 @@ def init():
  if "media_id" not in draft_cols:c.execute("ALTER TABLE drafts ADD COLUMN media_id TEXT DEFAULT ''")
  if "instagram_type" not in draft_cols:c.execute("ALTER TABLE drafts ADD COLUMN instagram_type TEXT DEFAULT 'post'")
  if "facebook_type" not in draft_cols:c.execute("ALTER TABLE drafts ADD COLUMN facebook_type TEXT DEFAULT 'post'")
+ if "schedule_mode" not in draft_cols:c.execute("ALTER TABLE drafts ADD COLUMN schedule_mode TEXT DEFAULT 'custom'")
  library_cols=[x[1] for x in c.execute("PRAGMA table_info(library)").fetchall()]
  if "image_url" not in library_cols:c.execute("ALTER TABLE library ADD COLUMN image_url TEXT DEFAULT ''")
+ for column in ("event_date","start_time","end_time","location"):
+  if column not in library_cols:c.execute(f"ALTER TABLE library ADD COLUMN {column} TEXT DEFAULT ''")
  c.execute("INSERT OR IGNORE INTO settings(id,lm_url,lm_model,temperature,max_tokens,buffer_token,buffer_channel,lm_token) VALUES(1,?,?,?,?,?,?,?)",("http://host.docker.internal:1234","qwen",0.4,2400,"","",""));
  c.execute("UPDATE settings SET facebook_channel=buffer_channel WHERE (facebook_channel IS NULL OR facebook_channel='') AND buffer_channel IS NOT NULL AND buffer_channel!=''")
  c.execute("INSERT OR IGNORE INTO tones VALUES(?,?,?)",("tone_conversational","Conversational","Natural, warm, direct, and human. Avoid corporate language."));c.commit();c.close()
@@ -47,12 +50,21 @@ def add_library():
  if request.content_type and "multipart" in request.content_type:
   f=request.files.get("file");ident=str(uuid.uuid4());name=None
   if f and f.filename:name=Path(f.filename).name;f.save(UPLOADS/f"{ident}-{name}")
-  record=(ident,request.form.get("category","Information"),request.form.get("title","").strip(),request.form.get("details",""),request.form.get("url",""),name,datetime.now(timezone.utc).isoformat(),request.form.get("image_url","").strip())
+  record=(ident,request.form.get("category","Information"),request.form.get("title","").strip(),request.form.get("details",""),request.form.get("url",""),name,datetime.now(timezone.utc).isoformat(),request.form.get("image_url","").strip(),request.form.get("event_date",""),request.form.get("start_time",""),request.form.get("end_time",""),request.form.get("location",""))
   if not record[2]:return jsonify(error="Title is required"),400
  else:
-  x=request.get_json(force=True);record=(str(uuid.uuid4()),x.get("category","Information"),x.get("title","" ).strip(),x.get("details",""),x.get("url",""),None,datetime.now(timezone.utc).isoformat(),x.get("image_url",""))
+  x=request.get_json(force=True);record=(str(uuid.uuid4()),x.get("category","Information"),x.get("title","" ).strip(),x.get("details",""),x.get("url",""),None,datetime.now(timezone.utc).isoformat(),x.get("image_url",""),x.get("event_date",""),x.get("start_time",""),x.get("end_time",""),x.get("location",""))
   if not record[2]:return jsonify(error="Title is required"),400
- c=db();c.execute("INSERT INTO library(id,category,title,details,url,filename,created_at,image_url) VALUES(?,?,?,?,?,?,?,?)",record);c.commit();c.close();return jsonify(ok=True)
+ c=db();c.execute("INSERT INTO library(id,category,title,details,url,filename,created_at,image_url,event_date,start_time,end_time,location) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",record);c.commit();c.close();return jsonify(ok=True)
+@app.put("/api/library/<ident>")
+def edit_library(ident):
+ x=request.form;f=request.files.get("file");c=db();old=c.execute("SELECT * FROM library WHERE id=?",(ident,)).fetchone()
+ if not old:return jsonify(error="Information not found"),404
+ name=old["filename"]
+ if f and f.filename:name=Path(f.filename).name;f.save(UPLOADS/f"{ident}-{name}")
+ title=x.get("title","").strip()
+ if not title:return jsonify(error="Title is required"),400
+ c.execute("UPDATE library SET category=?,title=?,details=?,url=?,filename=?,image_url=?,event_date=?,start_time=?,end_time=?,location=? WHERE id=?",(x.get("category","Information"),title,x.get("details",""),x.get("url",""),name,x.get("image_url",""),x.get("event_date",""),x.get("start_time",""),x.get("end_time",""),x.get("location",""),ident));c.commit();c.close();return jsonify(ok=True)
 @app.delete("/api/library/<ident>")
 def del_library(ident): c=db();r=c.execute("SELECT filename FROM library WHERE id=?",(ident,)).fetchone();c.execute("DELETE FROM library WHERE id=?",(ident,));c.commit();c.close();return jsonify(ok=True)
 @app.post("/api/tones")
@@ -75,15 +87,16 @@ def extract_json(text):
   raise
 @app.post("/api/generate")
 def generate():
- x=request.get_json(force=True);count=max(1,min(30,int(x.get("count",1))));selected=x.get("library_ids",[]);tone_id=x.get("tone_id");platforms=x.get("platforms",[]);instagram_type=x.get("instagram_type","post");facebook_type=x.get("facebook_type","post")
+ x=request.get_json(force=True);count=max(1,min(30,int(x.get("count",1))));selected=x.get("library_ids",[]);tone_id=x.get("tone_id");platforms=x.get("platforms",[]);instagram_type=x.get("instagram_type","post");facebook_type=x.get("facebook_type","post");schedule_mode=x.get("schedule_mode","queue")
  if instagram_type not in ("post","story"):return jsonify(error="Instagram type must be Post or Story"),400
  if facebook_type not in ("post","story"):return jsonify(error="Facebook type must be Post or Story"),400
  if not platforms:return jsonify(error="Choose Facebook, Instagram, or both"),400
- lib=rows(f"SELECT id,category,title,details,url,filename,image_url FROM library WHERE id IN ({','.join('?'*len(selected))})",selected) if selected else []
+ if schedule_mode not in ("queue","custom"):return jsonify(error="Invalid scheduling choice"),400
+ lib=rows(f"SELECT id,category,title,details,url,filename,image_url,event_date,start_time,end_time,location FROM library WHERE id IN ({','.join('?'*len(selected))})",selected) if selected else []
  media_id=x.get("media_id","");media_rows=rows("SELECT id,title,filename,image_url FROM library WHERE id=?",(media_id,)) if media_id else [];media_item=media_rows[0] if media_rows and ((media_rows[0].get("filename") or "").lower().endswith((".jpg",".jpeg",".png",".webp",".gif")) or (media_rows[0].get("image_url") or "").startswith(("http://","https://"))) else None
  if "instagram" in platforms and not media_item:return jsonify(error="Instagram requires an image. Select information with an uploaded image or flyer."),400
  tone=rows("SELECT prompt FROM tones WHERE id=?",(tone_id,));tone=tone[0]["prompt"] if tone else "Clear and conversational"
- s=rows("SELECT * FROM settings WHERE id=1")[0];start=datetime.fromisoformat(x["start"]);end=datetime.fromisoformat(x.get("end") or x["start"]);span=(end-start).total_seconds()
+ s=rows("SELECT * FROM settings WHERE id=1")[0];start=datetime.fromisoformat(x["start"]) if schedule_mode=="custom" else datetime.now(timezone.utc);end=datetime.fromisoformat(x.get("end") or x["start"]) if schedule_mode=="custom" else start;span=(end-start).total_seconds()
  prompt={"posts":count,"subject":x.get("subject",""),"tone":tone,"platforms":platforms,"additional_instructions":x.get("instructions",""),"selected_information":lib}
  schema={"name":"social_posts","strict":True,"schema":{"type":"object","properties":{"posts":{"type":"array","items":{"type":"object","properties":{"caption":{"type":"string"}},"required":["caption"],"additionalProperties":False}}},"required":["posts"],"additionalProperties":False}}
  payload={"model":s["lm_model"],"temperature":s["temperature"],"max_tokens":s["max_tokens"],"response_format":{"type":"json_schema","json_schema":schema},"messages":[{"role":"system","content":"Write exactly the requested count of distinct, finished social posts. Use only supplied facts. Format each caption for easy reading: use short paragraphs separated by blank lines, put the call to action on its own line, and put any hashtags on a final separate line. Never return one dense wall of text."},{"role":"user","content":json.dumps(prompt)}]}
@@ -102,7 +115,7 @@ def generate():
   for i,p in enumerate(generated):
    caption=str(p.get("caption","")).strip();
    if not caption:continue
-   when=start.timestamp()+(0 if count==1 else span*i/(count-1));scheduled=datetime.fromtimestamp(when,timezone.utc).isoformat();ident=str(uuid.uuid4());c.execute("INSERT INTO drafts(id,caption,scheduled_at,status,tone,subject,buffer_id,created_at,platforms,media_id,instagram_type,facebook_type) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",(ident,caption,scheduled,"pending",tone,x.get("subject",""),None,datetime.now(timezone.utc).isoformat(),json.dumps(platforms),media_item["id"] if media_item else "",instagram_type,facebook_type));created.append(ident)
+   when=start.timestamp()+(0 if count==1 else span*i/(count-1));scheduled=datetime.fromtimestamp(when,timezone.utc).isoformat();ident=str(uuid.uuid4());c.execute("INSERT INTO drafts(id,caption,scheduled_at,status,tone,subject,buffer_id,created_at,platforms,media_id,instagram_type,facebook_type,schedule_mode) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",(ident,caption,scheduled,"pending",tone,x.get("subject",""),None,datetime.now(timezone.utc).isoformat(),json.dumps(platforms),media_item["id"] if media_item else "",instagram_type,facebook_type,schedule_mode));created.append(ident)
   c.commit();c.close();return jsonify(created=len(created))
  except requests.RequestException as e:return jsonify(error=f"Cannot reach LM Studio: {e}"),502
  except (KeyError,ValueError,json.JSONDecodeError) as e:return jsonify(error=f"Qwen response could not be parsed: {e}"),422
@@ -133,11 +146,11 @@ def approve(ident):
    if not s["public_url"]:return jsonify(error="This post uses an uploaded image. Set the Public HTTPS address in Settings so Buffer can retrieve it, or save a direct public image URL with the Information item."),400
    media_url=s["public_url"].rstrip("/")+"/media/"+d["media_id"]
  if "instagram" in platforms and not media_url:return jsonify(error="Instagram requires an image"),400
- query="""mutation CreatePost($text:String!,$channel:ChannelId!,$due:DateTime!,$assets:[AssetInput!]!,$metadata:PostInputMetaData){createPost(input:{text:$text,channelId:$channel,schedulingType:automatic,mode:customScheduled,dueAt:$due,assets:$assets,metadata:$metadata}){... on PostActionSuccess{post{id text dueAt}} ... on MutationError{message}}}"""
+ query="""mutation CreatePost($text:String!,$channel:ChannelId!,$due:DateTime,$mode:ShareMode!,$assets:[AssetInput!]!,$metadata:PostInputMetaData){createPost(input:{text:$text,channelId:$channel,schedulingType:automatic,mode:$mode,dueAt:$due,assets:$assets,metadata:$metadata}){... on PostActionSuccess{post{id text dueAt}} ... on MutationError{message}}}"""
  post_ids=[]
  for platform in platforms:
   metadata={"instagram":{"type":d["instagram_type"] or "post","shouldShareToFeed":True}} if platform=="instagram" else {"facebook":{"type":d["facebook_type"] or "post"}}
-  variables={"text":d["caption"],"channel":channels[platform],"due":d["scheduled_at"],"assets":[{"image":{"url":media_url}}] if media_url else [],"metadata":metadata}
+  variables={"text":d["caption"],"channel":channels[platform],"due":d["scheduled_at"] if d["schedule_mode"]=="custom" else None,"mode":"customScheduled" if d["schedule_mode"]=="custom" else "addToQueue","assets":[{"image":{"url":media_url}}] if media_url else [],"metadata":metadata}
   try:r=requests.post("https://api.buffer.com",headers={"Authorization":"Bearer "+s["buffer_token"]},json={"query":query,"variables":variables},timeout=60)
   except requests.RequestException as e:return jsonify(error=f"Could not reach Buffer: {e}"),502
   try:
