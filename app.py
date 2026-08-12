@@ -4,7 +4,7 @@ from pathlib import Path
 from flask import Flask, jsonify, render_template, request, send_file
 import requests
 
-VERSION="1.5.0"; ROOT=Path(__file__).parent; DATA=Path(os.getenv("DATA_DIR",ROOT/"data")); UPLOADS=DATA/"uploads"; DB=DATA/"social-cockpit.db"
+VERSION="1.5.1"; ROOT=Path(__file__).parent; DATA=Path(os.getenv("DATA_DIR",ROOT/"data")); UPLOADS=DATA/"uploads"; DB=DATA/"social-cockpit.db"
 DATA.mkdir(exist_ok=True);UPLOADS.mkdir(exist_ok=True)
 app=Flask(__name__);app.config["MAX_CONTENT_LENGTH"]=25*1024*1024
 def db(): c=sqlite3.connect(DB);c.row_factory=sqlite3.Row;return c
@@ -29,6 +29,8 @@ def init():
  if "image_url" not in library_cols:c.execute("ALTER TABLE library ADD COLUMN image_url TEXT DEFAULT ''")
  for column in ("event_date","start_time","end_time","location"):
   if column not in library_cols:c.execute(f"ALTER TABLE library ADD COLUMN {column} TEXT DEFAULT ''")
+ for column in ("recurrence","recurrence_days","recurrence_end"):
+  if column not in library_cols:c.execute(f"ALTER TABLE library ADD COLUMN {column} TEXT DEFAULT ''")
  tone_cols=[x[1] for x in c.execute("PRAGMA table_info(tones)").fetchall()]
  if "is_default" not in tone_cols:c.execute("ALTER TABLE tones ADD COLUMN is_default INTEGER DEFAULT 0")
  c.execute("INSERT OR IGNORE INTO settings(id,lm_url,lm_model,temperature,max_tokens,buffer_token,buffer_channel,lm_token) VALUES(1,?,?,?,?,?,?,?)",("http://host.docker.internal:1234","qwen",0.4,2400,"","",""));
@@ -36,6 +38,9 @@ def init():
  c.execute("INSERT OR IGNORE INTO tones(id,name,prompt,is_default) VALUES(?,?,?,?)",("tone_conversational","Conversational","Natural, warm, direct, and human. Avoid corporate language.",1));c.execute("UPDATE tones SET is_default=1 WHERE id=(SELECT id FROM tones ORDER BY name LIMIT 1) AND NOT EXISTS(SELECT 1 FROM tones WHERE is_default=1)");c.commit();c.close()
 init()
 def rows(sql,args=()): c=db();r=[dict(x) for x in c.execute(sql,args).fetchall()];c.close();return r
+def web_url(value):
+ value=(value or "").strip()
+ return value if not value or value.startswith(("http://","https://")) else "https://"+value
 @app.get("/")
 def home(): return render_template("index.html",version=VERSION)
 @app.get("/media/<ident>")
@@ -52,12 +57,12 @@ def add_library():
  if request.content_type and "multipart" in request.content_type:
   f=request.files.get("file");ident=str(uuid.uuid4());name=None
   if f and f.filename:name=Path(f.filename).name;f.save(UPLOADS/f"{ident}-{name}")
-  record=(ident,request.form.get("category","Information"),request.form.get("title","").strip(),request.form.get("details",""),request.form.get("url",""),name,datetime.now(timezone.utc).isoformat(),request.form.get("image_url","").strip(),request.form.get("event_date",""),request.form.get("start_time",""),request.form.get("end_time",""),request.form.get("location",""))
+  record=(ident,request.form.get("category","Information"),request.form.get("title","").strip(),request.form.get("details",""),web_url(request.form.get("url")),name,datetime.now(timezone.utc).isoformat(),web_url(request.form.get("image_url")),request.form.get("event_date",""),request.form.get("start_time",""),request.form.get("end_time",""),request.form.get("location",""),request.form.get("recurrence","one_time"),json.dumps(request.form.getlist("recurrence_day")),request.form.get("recurrence_end",""))
   if not record[2]:return jsonify(error="Title is required"),400
  else:
-  x=request.get_json(force=True);record=(str(uuid.uuid4()),x.get("category","Information"),x.get("title","" ).strip(),x.get("details",""),x.get("url",""),None,datetime.now(timezone.utc).isoformat(),x.get("image_url",""),x.get("event_date",""),x.get("start_time",""),x.get("end_time",""),x.get("location",""))
+  x=request.get_json(force=True);record=(str(uuid.uuid4()),x.get("category","Information"),x.get("title","" ).strip(),x.get("details",""),x.get("url",""),None,datetime.now(timezone.utc).isoformat(),x.get("image_url",""),x.get("event_date",""),x.get("start_time",""),x.get("end_time",""),x.get("location",""),x.get("recurrence","one_time"),json.dumps(x.get("recurrence_days",[])),x.get("recurrence_end",""))
   if not record[2]:return jsonify(error="Title is required"),400
- c=db();c.execute("INSERT INTO library(id,category,title,details,url,filename,created_at,image_url,event_date,start_time,end_time,location) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",record);c.commit();c.close();return jsonify(ok=True)
+ c=db();c.execute("INSERT INTO library(id,category,title,details,url,filename,created_at,image_url,event_date,start_time,end_time,location,recurrence,recurrence_days,recurrence_end) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",record);c.commit();c.close();return jsonify(ok=True)
 @app.put("/api/library/<ident>")
 def edit_library(ident):
  x=request.form;f=request.files.get("file");c=db();old=c.execute("SELECT * FROM library WHERE id=?",(ident,)).fetchone()
@@ -66,7 +71,7 @@ def edit_library(ident):
  if f and f.filename:name=Path(f.filename).name;f.save(UPLOADS/f"{ident}-{name}")
  title=x.get("title","").strip()
  if not title:return jsonify(error="Title is required"),400
- c.execute("UPDATE library SET category=?,title=?,details=?,url=?,filename=?,image_url=?,event_date=?,start_time=?,end_time=?,location=? WHERE id=?",(x.get("category","Information"),title,x.get("details",""),x.get("url",""),name,x.get("image_url",""),x.get("event_date",""),x.get("start_time",""),x.get("end_time",""),x.get("location",""),ident));c.commit();c.close();return jsonify(ok=True)
+ c.execute("UPDATE library SET category=?,title=?,details=?,url=?,filename=?,image_url=?,event_date=?,start_time=?,end_time=?,location=?,recurrence=?,recurrence_days=?,recurrence_end=? WHERE id=?",(x.get("category","Information"),title,x.get("details",""),web_url(x.get("url")),name,web_url(x.get("image_url")),x.get("event_date",""),x.get("start_time",""),x.get("end_time",""),x.get("location",""),x.get("recurrence","one_time"),json.dumps(x.getlist("recurrence_day")),x.get("recurrence_end",""),ident));c.commit();c.close();return jsonify(ok=True)
 @app.delete("/api/library/<ident>")
 def del_library(ident): c=db();r=c.execute("SELECT filename FROM library WHERE id=?",(ident,)).fetchone();c.execute("DELETE FROM library WHERE id=?",(ident,));c.commit();c.close();return jsonify(ok=True)
 @app.post("/api/tones")
@@ -96,7 +101,7 @@ def generate():
  if facebook_type not in ("post","story"):return jsonify(error="Facebook type must be Post or Story"),400
  if not platforms:return jsonify(error="Choose Facebook, Instagram, or both"),400
  if schedule_mode not in ("queue","custom"):return jsonify(error="Invalid scheduling choice"),400
- lib=rows(f"SELECT id,category,title,details,url,filename,image_url,event_date,start_time,end_time,location FROM library WHERE id IN ({','.join('?'*len(selected))})",selected) if selected else []
+ lib=rows(f"SELECT id,category,title,details,url,filename,image_url,event_date,start_time,end_time,location,recurrence,recurrence_days,recurrence_end FROM library WHERE id IN ({','.join('?'*len(selected))})",selected) if selected else []
  media_id=x.get("media_id","");media_rows=rows("SELECT id,title,filename,image_url FROM library WHERE id=?",(media_id,)) if media_id else [];media_item=media_rows[0] if media_rows and ((media_rows[0].get("filename") or "").lower().endswith((".jpg",".jpeg",".png",".webp",".gif")) or (media_rows[0].get("image_url") or "").startswith(("http://","https://"))) else None
  if "instagram" in platforms and not media_item:return jsonify(error="Instagram requires an image. Select information with an uploaded image or flyer."),400
  tone=rows("SELECT prompt FROM tones WHERE id=?",(tone_id,));tone=tone[0]["prompt"] if tone else "Clear and conversational"
