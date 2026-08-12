@@ -1,5 +1,5 @@
 FROM node:22-alpine AS build
-ARG APP_VERSION=0.2.0
+ARG APP_VERSION=0.3.0
 ENV APP_VERSION=$APP_VERSION
 WORKDIR /app
 COPY package.json package-lock.json ./
@@ -8,7 +8,7 @@ COPY . .
 RUN npm run build
 
 FROM node:22-alpine AS runtime
-ARG APP_VERSION=0.2.0
+ARG APP_VERSION=0.3.0
 WORKDIR /app
 ENV NODE_ENV=production HOST=0.0.0.0 PORT=3000 APP_VERSION=$APP_VERSION
 LABEL org.opencontainers.image.title="Social Cockpit" \

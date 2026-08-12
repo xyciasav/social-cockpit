@@ -22,6 +22,13 @@
       "when": 1786505744632,
       "tag": "0002_known_shockwave",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "6",
+      "when": 1786507927358,
+      "tag": "0003_fat_nicolaos",
+      "breakpoints": true
     }
   ]
 }
