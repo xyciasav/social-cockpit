@@ -4,7 +4,7 @@ from pathlib import Path
 from flask import Flask, jsonify, render_template, request, send_file
 import requests
 
-VERSION="1.2.1"; ROOT=Path(__file__).parent; DATA=Path(os.getenv("DATA_DIR",ROOT/"data")); UPLOADS=DATA/"uploads"; DB=DATA/"social-cockpit.db"
+VERSION="1.2.2"; ROOT=Path(__file__).parent; DATA=Path(os.getenv("DATA_DIR",ROOT/"data")); UPLOADS=DATA/"uploads"; DB=DATA/"social-cockpit.db"
 DATA.mkdir(exist_ok=True);UPLOADS.mkdir(exist_ok=True)
 app=Flask(__name__);app.config["MAX_CONTENT_LENGTH"]=25*1024*1024
 def db(): c=sqlite3.connect(DB);c.row_factory=sqlite3.Row;return c
@@ -22,6 +22,7 @@ def init():
  draft_cols=[x[1] for x in c.execute("PRAGMA table_info(drafts)").fetchall()]
  if "platforms" not in draft_cols:c.execute("ALTER TABLE drafts ADD COLUMN platforms TEXT DEFAULT 'facebook'")
  if "media_id" not in draft_cols:c.execute("ALTER TABLE drafts ADD COLUMN media_id TEXT DEFAULT ''")
+ if "instagram_type" not in draft_cols:c.execute("ALTER TABLE drafts ADD COLUMN instagram_type TEXT DEFAULT 'post'")
  library_cols=[x[1] for x in c.execute("PRAGMA table_info(library)").fetchall()]
  if "image_url" not in library_cols:c.execute("ALTER TABLE library ADD COLUMN image_url TEXT DEFAULT ''")
  c.execute("INSERT OR IGNORE INTO settings(id,lm_url,lm_model,temperature,max_tokens,buffer_token,buffer_channel,lm_token) VALUES(1,?,?,?,?,?,?,?)",("http://host.docker.internal:1234","qwen",0.4,2400,"","",""));
@@ -73,7 +74,8 @@ def extract_json(text):
   raise
 @app.post("/api/generate")
 def generate():
- x=request.get_json(force=True);count=max(1,min(30,int(x.get("count",1))));selected=x.get("library_ids",[]);tone_id=x.get("tone_id");platforms=x.get("platforms",[])
+ x=request.get_json(force=True);count=max(1,min(30,int(x.get("count",1))));selected=x.get("library_ids",[]);tone_id=x.get("tone_id");platforms=x.get("platforms",[]);instagram_type=x.get("instagram_type","post")
+ if instagram_type not in ("post","story"):return jsonify(error="Instagram type must be Post or Story"),400
  if not platforms:return jsonify(error="Choose Facebook, Instagram, or both"),400
  lib=rows(f"SELECT id,category,title,details,url,filename,image_url FROM library WHERE id IN ({','.join('?'*len(selected))})",selected) if selected else []
  media_id=x.get("media_id","");media_rows=rows("SELECT id,title,filename,image_url FROM library WHERE id=?",(media_id,)) if media_id else [];media_item=media_rows[0] if media_rows and ((media_rows[0].get("filename") or "").lower().endswith((".jpg",".jpeg",".png",".webp",".gif")) or (media_rows[0].get("image_url") or "").startswith(("http://","https://"))) else None
@@ -98,7 +100,7 @@ def generate():
   for i,p in enumerate(generated):
    caption=str(p.get("caption","")).strip();
    if not caption:continue
-   when=start.timestamp()+(0 if count==1 else span*i/(count-1));scheduled=datetime.fromtimestamp(when,timezone.utc).isoformat();ident=str(uuid.uuid4());c.execute("INSERT INTO drafts(id,caption,scheduled_at,status,tone,subject,buffer_id,created_at,platforms,media_id) VALUES(?,?,?,?,?,?,?,?,?,?)",(ident,caption,scheduled,"pending",tone,x.get("subject",""),None,datetime.now(timezone.utc).isoformat(),json.dumps(platforms),media_item["id"] if media_item else ""));created.append(ident)
+   when=start.timestamp()+(0 if count==1 else span*i/(count-1));scheduled=datetime.fromtimestamp(when,timezone.utc).isoformat();ident=str(uuid.uuid4());c.execute("INSERT INTO drafts(id,caption,scheduled_at,status,tone,subject,buffer_id,created_at,platforms,media_id,instagram_type) VALUES(?,?,?,?,?,?,?,?,?,?,?)",(ident,caption,scheduled,"pending",tone,x.get("subject",""),None,datetime.now(timezone.utc).isoformat(),json.dumps(platforms),media_item["id"] if media_item else "",instagram_type));created.append(ident)
   c.commit();c.close();return jsonify(created=len(created))
  except requests.RequestException as e:return jsonify(error=f"Cannot reach LM Studio: {e}"),502
  except (KeyError,ValueError,json.JSONDecodeError) as e:return jsonify(error=f"Qwen response could not be parsed: {e}"),422
@@ -129,10 +131,11 @@ def approve(ident):
    if not s["public_url"]:return jsonify(error="This post uses an uploaded image. Set the Public HTTPS address in Settings so Buffer can retrieve it, or save a direct public image URL with the Information item."),400
    media_url=s["public_url"].rstrip("/")+"/media/"+d["media_id"]
  if "instagram" in platforms and not media_url:return jsonify(error="Instagram requires an image"),400
- query="""mutation CreatePost($text:String!,$channel:ChannelId!,$due:DateTime!,$assets:[AssetInput!]!){createPost(input:{text:$text,channelId:$channel,schedulingType:automatic,mode:customScheduled,dueAt:$due,assets:$assets}){... on PostActionSuccess{post{id text dueAt}} ... on MutationError{message}}}"""
+ query="""mutation CreatePost($text:String!,$channel:ChannelId!,$due:DateTime!,$assets:[AssetInput!]!,$metadata:PostInputMetaData){createPost(input:{text:$text,channelId:$channel,schedulingType:automatic,mode:customScheduled,dueAt:$due,assets:$assets,metadata:$metadata}){... on PostActionSuccess{post{id text dueAt}} ... on MutationError{message}}}"""
  post_ids=[]
  for platform in platforms:
-  variables={"text":d["caption"],"channel":channels[platform],"due":d["scheduled_at"],"assets":[{"image":{"url":media_url}}] if media_url else []}
+  metadata={"instagram":{"type":d["instagram_type"] or "post","shouldShareToFeed":True}} if platform=="instagram" else None
+  variables={"text":d["caption"],"channel":channels[platform],"due":d["scheduled_at"],"assets":[{"image":{"url":media_url}}] if media_url else [],"metadata":metadata}
   try:r=requests.post("https://api.buffer.com",headers={"Authorization":"Bearer "+s["buffer_token"]},json={"query":query,"variables":variables},timeout=60)
   except requests.RequestException as e:return jsonify(error=f"Could not reach Buffer: {e}"),502
   try:
