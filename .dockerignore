@@ -1,9 +1,4 @@
 .git
-.wrangler
-.next
-dist
-node_modules
-npm-debug.log*
+data
+__pycache__
 .env
-.env.*
-!.env.example
