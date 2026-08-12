@@ -3,7 +3,8 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: social-cockpit:latest
+      args:
+        APP_VERSION: "${APP_VERSION:-0.2.0}"
     container_name: social-cockpit
     restart: unless-stopped
     ports:
@@ -12,11 +13,16 @@ services:
       - "host.docker.internal:host-gateway"
     environment:
       NODE_ENV: production
+      APP_VERSION: "${APP_VERSION:-0.2.0}"
       LLM_BASE_URL: "${LLM_BASE_URL:-}"
       LLM_API_KEY: "${LLM_API_KEY:-}"
       LLM_MODEL: "${LLM_MODEL:-}"
       LLM_TEMPERATURE: "${LLM_TEMPERATURE:-0.4}"
       LLM_MAX_TOKENS: "${LLM_MAX_TOKENS:-1200}"
+    labels:
+      org.opencontainers.image.title: "Social Cockpit"
+      org.opencontainers.image.version: "${APP_VERSION:-0.2.0}"
+      org.opencontainers.image.source: "https://github.com/xyciasav/social-cockpit"
     volumes:
       - social-cockpit-data:/app/.wrangler
     healthcheck:

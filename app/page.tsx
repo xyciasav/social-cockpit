@@ -6,14 +6,15 @@ type Message={role:"user"|"assistant";content:string;activity?:Array<{tool:strin
 const headers={"content-type":"application/json","x-workspace-id":"ws_riverlight"};
 
 export default function Home(){
+  const [version,setVersion]=useState("0.2.0");
   const [messages,setMessages]=useState<Message[]>([{role:"assistant",content:"Tell me what you need to post about. Give me an event, link, rough notes, or just an idea—I’ll write the posts and save them as drafts for you."}]);
   const [input,setInput]=useState("");const [busy,setBusy]=useState(false);const [drafts,setDrafts]=useState<Draft[]>([]);const [error,setError]=useState("");const end=useRef<HTMLDivElement>(null);
   async function load(){try{await fetch("/api/bootstrap",{method:"POST",headers});const r=await fetch("/api/approvals",{headers});const d=await r.json();if(!r.ok)throw new Error(d.error);setDrafts(d.approvals||[])}catch(e){setError(e instanceof Error?e.message:"Could not load drafts")}}
-  useEffect(()=>{load()},[]);useEffect(()=>{end.current?.scrollIntoView({behavior:"smooth"})},[messages,busy]);
+  useEffect(()=>{load();fetch("/api/version").then(r=>r.json()).then(d=>setVersion(d.version)).catch(()=>{})},[]);useEffect(()=>{end.current?.scrollIntoView({behavior:"smooth"})},[messages,busy]);
   async function send(text=input){const prompt=text.trim();if(!prompt||busy)return;setInput("");setError("");setMessages(m=>[...m,{role:"user",content:prompt}]);setBusy(true);try{const r=await fetch("/api/ai/chat",{method:"POST",headers,body:JSON.stringify({message:prompt,workspaceId:"ws_riverlight",currentView:"Post generator",useAnalytics:false})});const d=await r.json();if(!r.ok)throw new Error(d.error);setMessages(m=>[...m,{role:"assistant",content:d.message||"Done.",activity:d.activity}]);await load()}catch(e){const msg=e instanceof Error?e.message:"LM Studio could not be reached";setError(msg);setMessages(m=>[...m,{role:"assistant",content:`I couldn’t reach Qwen. ${msg}`}])}finally{setBusy(false)}}
   async function decide(id:string,decision:"approved"|"rejected"){const r=await fetch("/api/approvals",{method:"PATCH",headers,body:JSON.stringify({postId:id,decision})});const d=await r.json();if(!r.ok){setError(d.error);return}await load()}
   return <main className="cockpit">
-    <header className="top"><div className="logo">SC</div><div><h1>Social Cockpit</h1><p>Qwen-powered post assistant</p></div><span className="connection"><i/> LM Studio</span></header>
+    <header className="top"><div className="logo">SC</div><div><h1>Social Cockpit</h1><p>Qwen-powered post assistant <b className="version">v{version}</b></p></div><span className="connection"><i/> LM Studio</span></header>
     <section className="workspace">
       <div className="chat">
         <div className="intro"><span>RIVERLIGHT HQ</span><h2>What are we posting?</h2><p>Talk naturally. Qwen can write, revise, and save drafts—but never publish without you.</p></div>
