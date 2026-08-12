@@ -4,7 +4,7 @@ from pathlib import Path
 from flask import Flask, jsonify, render_template, request, send_file
 import requests
 
-VERSION="1.1.0"; ROOT=Path(__file__).parent; DATA=Path(os.getenv("DATA_DIR",ROOT/"data")); UPLOADS=DATA/"uploads"; DB=DATA/"social-cockpit.db"
+VERSION="1.1.1"; ROOT=Path(__file__).parent; DATA=Path(os.getenv("DATA_DIR",ROOT/"data")); UPLOADS=DATA/"uploads"; DB=DATA/"social-cockpit.db"
 DATA.mkdir(exist_ok=True);UPLOADS.mkdir(exist_ok=True)
 app=Flask(__name__);app.config["MAX_CONTENT_LENGTH"]=25*1024*1024
 def db(): c=sqlite3.connect(DB);c.row_factory=sqlite3.Row;return c
