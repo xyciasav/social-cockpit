@@ -1,4 +1,4 @@
-# vinext-starter
+# Social Cockpit
 
 A clean full-stack starter running on
 [vinext](https://github.com/cloudflare/vinext), with optional Cloudflare D1 and
@@ -17,6 +17,16 @@ npm run build
 ```
 
 This starter does not use `wrangler.jsonc`.
+
+## Docker Compose
+
+Copy `.env.example` to `.env`, adjust the optional LLM provider settings, then run:
+
+```bash
+docker compose up -d --build
+```
+
+Open `http://localhost:3000`. Change `SOCIAL_COCKPIT_PORT` if port 3000 is already in use. Without an LLM provider, the assistant uses safe demonstration mode.
 
 ## Included Shape
 

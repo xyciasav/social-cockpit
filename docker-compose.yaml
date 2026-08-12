@@ -1,0 +1,28 @@
+services:
+  social-cockpit:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: social-cockpit:latest
+    container_name: social-cockpit
+    restart: unless-stopped
+    ports:
+      - "${SOCIAL_COCKPIT_PORT:-3000}:3000"
+    environment:
+      NODE_ENV: production
+      LLM_BASE_URL: "${LLM_BASE_URL:-}"
+      LLM_API_KEY: "${LLM_API_KEY:-}"
+      LLM_MODEL: "${LLM_MODEL:-}"
+      LLM_TEMPERATURE: "${LLM_TEMPERATURE:-0.4}"
+      LLM_MAX_TOKENS: "${LLM_MAX_TOKENS:-1200}"
+    volumes:
+      - social-cockpit-data:/app/.wrangler
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://127.0.0.1:3000/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+volumes:
+  social-cockpit-data:
