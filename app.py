@@ -4,7 +4,7 @@ from pathlib import Path
 from flask import Flask, jsonify, render_template, request, send_file
 import requests
 
-VERSION="1.5.1"; ROOT=Path(__file__).parent; DATA=Path(os.getenv("DATA_DIR",ROOT/"data")); UPLOADS=DATA/"uploads"; DB=DATA/"social-cockpit.db"
+VERSION="1.7.0"; ROOT=Path(__file__).parent; DATA=Path(os.getenv("DATA_DIR",ROOT/"data")); UPLOADS=DATA/"uploads"; DB=DATA/"social-cockpit.db"
 DATA.mkdir(exist_ok=True);UPLOADS.mkdir(exist_ok=True)
 app=Flask(__name__);app.config["MAX_CONTENT_LENGTH"]=25*1024*1024
 def db(): c=sqlite3.connect(DB);c.row_factory=sqlite3.Row;return c
@@ -96,35 +96,40 @@ def extract_json(text):
   raise
 @app.post("/api/generate")
 def generate():
- x=request.get_json(force=True);count=max(1,min(30,int(x.get("count",1))));selected=x.get("library_ids",[]);tone_id=x.get("tone_id");platforms=x.get("platforms",[]);instagram_type=x.get("instagram_type","post");facebook_type=x.get("facebook_type","post");schedule_mode=x.get("schedule_mode","queue")
+ x=request.get_json(force=True);count=max(1,min(10,int(x.get("count",1))));selected=x.get("coverage_ids",[]);tone_id=x.get("tone_id");platforms=x.get("platforms",[]);instagram_type=x.get("instagram_type","post");facebook_type=x.get("facebook_type","post");schedule_mode=x.get("schedule_mode","queue")
  if instagram_type not in ("post","story"):return jsonify(error="Instagram type must be Post or Story"),400
  if facebook_type not in ("post","story"):return jsonify(error="Facebook type must be Post or Story"),400
  if not platforms:return jsonify(error="Choose Facebook, Instagram, or both"),400
  if schedule_mode not in ("queue","custom"):return jsonify(error="Invalid scheduling choice"),400
  lib=rows(f"SELECT id,category,title,details,url,filename,image_url,event_date,start_time,end_time,location,recurrence,recurrence_days,recurrence_end FROM library WHERE id IN ({','.join('?'*len(selected))})",selected) if selected else []
- media_id=x.get("media_id","");media_rows=rows("SELECT id,title,filename,image_url FROM library WHERE id=?",(media_id,)) if media_id else [];media_item=media_rows[0] if media_rows and ((media_rows[0].get("filename") or "").lower().endswith((".jpg",".jpeg",".png",".webp",".gif")) or (media_rows[0].get("image_url") or "").startswith(("http://","https://"))) else None
- if "instagram" in platforms and not media_item:return jsonify(error="Instagram requires an image. Select information with an uploaded image or flyer."),400
+ order={ident:i for i,ident in enumerate(selected)};lib.sort(key=lambda item:order.get(item["id"],9999));custom=(x.get("subject") or "").strip();topics=[{"subject":item["title"],"information":[item],"media_id":item["id"] if item.get("filename") or item.get("image_url") else ""} for item in lib]
+ fallback=x.get("media_id","")
+ if custom:topics.append({"subject":custom,"information":[],"media_id":fallback})
+ if not topics:return jsonify(error="Add at least one saved item or custom topic to the queue"),400
+ if count*len(topics)>30:return jsonify(error="This queue is limited to 30 drafts at a time"),400
+ if "instagram" in platforms:
+  missing=[topic["subject"] for topic in topics if not topic["media_id"]]
+  if missing:return jsonify(error="Instagram requires an image for: "+", ".join(missing)),400
  tone=rows("SELECT prompt FROM tones WHERE id=?",(tone_id,));tone=tone[0]["prompt"] if tone else "Clear and conversational"
  s=rows("SELECT * FROM settings WHERE id=1")[0];start=datetime.fromisoformat(x["start"]) if schedule_mode=="custom" else datetime.now(timezone.utc);end=datetime.fromisoformat(x.get("end") or x["start"]) if schedule_mode=="custom" else start;span=(end-start).total_seconds()
- prompt={"posts":count,"subject":x.get("subject",""),"tone":tone,"platforms":platforms,"additional_instructions":x.get("instructions",""),"selected_information":lib}
  schema={"name":"social_posts","strict":True,"schema":{"type":"object","properties":{"posts":{"type":"array","items":{"type":"object","properties":{"caption":{"type":"string"}},"required":["caption"],"additionalProperties":False}}},"required":["posts"],"additionalProperties":False}}
- payload={"model":s["lm_model"],"temperature":s["temperature"],"max_tokens":s["max_tokens"],"response_format":{"type":"json_schema","json_schema":schema},"messages":[{"role":"system","content":"Write exactly the requested count of distinct, finished social posts. Use only supplied facts. Format each caption for easy reading: use short paragraphs separated by blank lines, put the call to action on its own line, and put any hashtags on a final separate line. Never return one dense wall of text."},{"role":"user","content":json.dumps(prompt)}]}
  try:
-  headers={"Authorization":"Bearer "+s["lm_token"]} if s["lm_token"] else {};generated=None;last_error=""
-  for attempt in range(2):
-   r=requests.post(s["lm_url"]+"/v1/chat/completions",headers=headers,json=payload,timeout=300);raw=r.text
-   if not r.ok:return jsonify(error=f"LM Studio {r.status_code}: {raw[:500]}"),502
-   try:
-    candidate=extract_json(r.json()["choices"][0]["message"]["content"])["posts"]
-    if len(candidate)==count:generated=candidate;break
-    last_error=f"Qwen returned {len(candidate)} posts; expected {count}"
-   except (KeyError,ValueError,json.JSONDecodeError) as e:last_error=str(e)
-  if generated is None:return jsonify(error=f"Qwen response could not be used after two attempts: {last_error}"),422
-  c=db();created=[]
-  for i,p in enumerate(generated):
-   caption=str(p.get("caption","")).strip();
-   if not caption:continue
-   when=start.timestamp()+(0 if count==1 else span*i/(count-1));scheduled=datetime.fromtimestamp(when,timezone.utc).isoformat();ident=str(uuid.uuid4());c.execute("INSERT INTO drafts(id,caption,scheduled_at,status,tone,subject,buffer_id,created_at,platforms,media_id,instagram_type,facebook_type,schedule_mode) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",(ident,caption,scheduled,"pending",tone,x.get("subject",""),None,datetime.now(timezone.utc).isoformat(),json.dumps(platforms),media_item["id"] if media_item else "",instagram_type,facebook_type,schedule_mode));created.append(ident)
+  headers={"Authorization":"Bearer "+s["lm_token"]} if s["lm_token"] else {};queued=[]
+  for topic in topics:
+   prompt={"posts":count,"subject":topic["subject"],"tone":tone,"platforms":platforms,"additional_instructions":x.get("instructions",""),"selected_information":topic["information"]};payload={"model":s["lm_model"],"temperature":s["temperature"],"max_tokens":s["max_tokens"],"response_format":{"type":"json_schema","json_schema":schema},"messages":[{"role":"system","content":"Write exactly the requested count of distinct, finished social posts about this single subject. Use only its supplied facts. Do not mix in other events or programs. Use short paragraphs separated by blank lines, a separate call to action, and hashtags on a final line."},{"role":"user","content":json.dumps(prompt)}]};generated=None;last_error=""
+   for attempt in range(2):
+    r=requests.post(s["lm_url"]+"/v1/chat/completions",headers=headers,json=payload,timeout=300);raw=r.text
+    if not r.ok:return jsonify(error=f"LM Studio {r.status_code}: {raw[:500]}"),502
+    try:
+     candidate=extract_json(r.json()["choices"][0]["message"]["content"])["posts"]
+     if len(candidate)==count:generated=candidate;break
+     last_error=f"Qwen returned {len(candidate)} posts; expected {count}"
+    except (KeyError,ValueError,json.JSONDecodeError) as e:last_error=str(e)
+   if generated is None:return jsonify(error=f"Qwen could not create posts for {topic['subject']}: {last_error}"),422
+   queued.extend((str(p.get("caption","")).strip(),topic) for p in generated if str(p.get("caption","")).strip())
+  c=db();created=[];total=len(queued)
+  for i,(caption,topic) in enumerate(queued):
+   when=start.timestamp()+(0 if total==1 else span*i/(total-1));scheduled=datetime.fromtimestamp(when,timezone.utc).isoformat();ident=str(uuid.uuid4());c.execute("INSERT INTO drafts(id,caption,scheduled_at,status,tone,subject,buffer_id,created_at,platforms,media_id,instagram_type,facebook_type,schedule_mode) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",(ident,caption,scheduled,"pending",tone,topic["subject"],None,datetime.now(timezone.utc).isoformat(),json.dumps(platforms),topic["media_id"],instagram_type,facebook_type,schedule_mode));created.append(ident)
   c.commit();c.close();return jsonify(created=len(created))
  except requests.RequestException as e:return jsonify(error=f"Cannot reach LM Studio: {e}"),502
  except (KeyError,ValueError,json.JSONDecodeError) as e:return jsonify(error=f"Qwen response could not be parsed: {e}"),422
