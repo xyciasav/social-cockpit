@@ -26,7 +26,9 @@ Copy `.env.example` to `.env`, adjust the optional LLM provider settings, then r
 docker compose up -d --build
 ```
 
-Open `http://localhost:38427`. Change `SOCIAL_COCKPIT_PORT` in `.env` if that high port is already in use. The container continues to use port 3000 internally; only the host-facing port is changed. Without an LLM provider, the assistant uses safe demonstration mode.
+Open `http://localhost:38427`. Change `SOCIAL_COCKPIT_PORT` in `.env` if that high port is already in use. The container continues to use port 3000 internally; only the host-facing port is changed. Configure `LLM_BASE_URL` and `LLM_MODEL` to enable the assistant.
+
+This project is self-hosted only. Releases are pushed to GitHub for deployment with Docker Compose; it is not deployed through ChatGPT Sites.
 
 ## Included Shape
 

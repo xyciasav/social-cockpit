@@ -11,7 +11,6 @@ ENV NODE_ENV=production HOST=0.0.0.0 PORT=3000
 COPY --from=build /app/package.json /app/package-lock.json ./
 COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
-COPY --from=build /app/.openai ./.openai
 COPY --from=build /app/drizzle ./drizzle
 RUN mkdir -p /app/.wrangler && chown -R node:node /app
 EXPOSE 3000
