@@ -38,6 +38,7 @@ export default function Home() {
   const [file, setFile] = useState<string>("");
   const [headers, setHeaders] = useState<string[]>([]);
   const [rows, setRows] = useState<string[][]>([]);
+  const [assistantOpen, setAssistantOpen] = useState(false);
   const input = useRef<HTMLInputElement>(null);
   const importReady = rows.length > 0;
 
@@ -51,7 +52,7 @@ export default function Home() {
     setFile(f.name); setHeaders(parsed[0] || []); setRows(parsed.slice(1));
   }
 
-  return <div className="app-shell">
+  return <div className={`app-shell ${assistantOpen ? "assistant-visible" : ""}`}>
     <aside>
       <div className="brand"><div className="brandmark">SC</div><div><strong>Social Cockpit</strong><span>Performance intelligence</span></div></div>
       <nav aria-label="Main navigation">
@@ -68,7 +69,37 @@ export default function Home() {
       {tab === "Recommendations" && <Recommendations optimize={optimize} setOptimize={setOptimize} />}
       {tab === "Imports" && <Imports file={file} headers={headers} rows={rows} detected={detected} input={input} loadFile={loadFile} importReady={importReady} />}
     </main>
+    <button className="ask-ai" onClick={() => setAssistantOpen(true)}><span>✦</span> Ask AI</button>
+    <AssistantPanel open={assistantOpen} close={() => setAssistantOpen(false)} currentView={tab} useAnalytics={optimize} />
   </div>;
+}
+
+type ChatMessage = { role: "assistant" | "user"; content: string; activity?: Array<{ tool?: string; kind?: string }> };
+
+function AssistantPanel({ open, close, currentView, useAnalytics }: { open: boolean; close: () => void; currentView: string; useAnalytics: boolean }) {
+  const [messages, setMessages] = useState<ChatMessage[]>([{ role: "assistant", content: "I’m your Riverlight HQ social media manager. I can inspect this workspace’s calendar, campaigns, drafts, media, and analytics—and create drafts that always wait for your approval." }]);
+  const [value, setValue] = useState("");
+  const [busy, setBusy] = useState(false);
+  const suggestions = currentView === "Campaigns" ? ["Give me four more posts for this campaign", "Is this campaign on track?"] : currentView === "Overview" ? ["What performed best last month?", "Find gaps in next week’s calendar"] : ["Show me everything waiting for approval", "Create 3 posts for next week"];
+
+  async function send(text = value) {
+    const prompt = text.trim(); if (!prompt || busy) return;
+    setMessages(old => [...old, { role: "user", content: prompt }]); setValue(""); setBusy(true);
+    try {
+      const response = await fetch("/api/ai/chat", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ message: prompt, workspaceId: "ws_riverlight", currentView, campaignId: currentView === "Campaigns" ? "cmp_fall" : undefined, useAnalytics }) });
+      const data = await response.json();
+      setMessages(old => [...old, { role: "assistant", content: data.message || data.error || "I couldn’t complete that request.", activity: data.activity }]);
+    } catch { setMessages(old => [...old, { role: "assistant", content: "The assistant service is unavailable. No data was changed." }]); }
+    finally { setBusy(false); }
+  }
+
+  return <><div className={`assistant-scrim ${open ? "show" : ""}`} onClick={close}/><aside className={`assistant-panel ${open ? "open" : ""}`} aria-hidden={!open}>
+    <div className="ai-head"><div><span className="ai-orb">✦</span><div><strong>Social Cockpit AI</strong><small>Riverlight HQ · {currentView}</small></div></div><button onClick={close} aria-label="Close assistant">×</button></div>
+    <div className="scope-note"><i/> Working only in <strong>Riverlight HQ</strong><span>Draft actions require human approval</span></div>
+    <div className="chat-stream">{messages.map((message, index) => <div className={`message ${message.role}`} key={index}><span>{message.role === "assistant" ? "✦" : "YOU"}</span><div><p>{message.content}</p>{message.activity?.length ? <div className="tool-trace">{message.activity.map((a,i) => <small key={i}><b>{a.kind === "draft_write" ? "Draft action" : "Checked"}</b> {String(a.tool).replaceAll("_", " ")}</small>)}</div> : null}</div></div>)}{busy && <div className="message assistant"><span>✦</span><div><p className="thinking">Inspecting workspace data…</p></div></div>}</div>
+    <div className="quick-prompts">{suggestions.map(s => <button key={s} onClick={() => send(s)}>{s}</button>)}</div>
+    <div className="composer"><textarea value={value} onChange={e => setValue(e.target.value)} onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } }} placeholder="Ask about your calendar, campaigns, or performance…"/><button onClick={() => send()} disabled={busy || !value.trim()} aria-label="Send">↑</button><footer><span>{useAnalytics ? "Analytics-aware generation on" : "Analytics-aware generation off"}</span><span>Enter to send</span></footer></div>
+  </aside></>;
 }
 
 function Overview({ range }: { range: string }) {
