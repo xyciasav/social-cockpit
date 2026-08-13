@@ -30,12 +30,16 @@ def isolate_background(source, target, tolerance=38):
         if y + 1 < height: queue.append((x, y + 1))
     alpha = alpha.filter(ImageFilter.GaussianBlur(.6))
     image.putalpha(alpha)
-    image.save(target, "PNG", optimize=True)
     extrema = alpha.getextrema()
     if extrema[0] == 255:
         raise ValueError("PNG still contains a background; automatic isolation found no removable canvas")
     if extrema[1] == 0:
         raise ValueError("Background removal produced an empty image")
+    bbox=alpha.getbbox()
+    if bbox:
+        padding=max(12,round(max(image.size)*.035));left=max(0,bbox[0]-padding);top=max(0,bbox[1]-padding);right=min(width,bbox[2]+padding);bottom=min(height,bbox[3]+padding)
+        image=image.crop((left,top,right,bottom))
+    image.save(target, "PNG", optimize=True)
 
 
 def vectorize_png(source, target, max_size=384):
