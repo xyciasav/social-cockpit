@@ -4,7 +4,8 @@ LABEL org.opencontainers.image.title="Social Cockpit" org.opencontainers.image.v
 WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
-COPY app.py .
+COPY app.py comfyui_client.py asset_processing.py ./
+COPY workflows ./workflows
 COPY templates ./templates
 COPY static ./static
 RUN mkdir -p /app/data && chown -R nobody:nogroup /app

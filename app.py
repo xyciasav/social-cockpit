@@ -1,11 +1,14 @@
-import json, os, sqlite3, uuid
+import json, os, random, sqlite3, threading, uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from flask import Flask, jsonify, render_template, request, send_file
 import requests
+from urllib.parse import urlsplit, urlunsplit
+from comfyui_client import ComfyUIClient, ComfyUIError
+from asset_processing import isolate_background, vectorize_png
 
-VERSION="1.10.0"; ROOT=Path(__file__).parent; DATA=Path(os.getenv("DATA_DIR",ROOT/"data")); UPLOADS=DATA/"uploads"; DB=DATA/"social-cockpit.db"
-DATA.mkdir(exist_ok=True);UPLOADS.mkdir(exist_ok=True)
+VERSION="1.11.0"; ROOT=Path(__file__).parent; DATA=Path(os.getenv("DATA_DIR",ROOT/"data")); UPLOADS=DATA/"uploads"; ASSETS=DATA/"generated-assets"; DB=DATA/"social-cockpit.db"
+DATA.mkdir(exist_ok=True);UPLOADS.mkdir(exist_ok=True);ASSETS.mkdir(exist_ok=True)
 app=Flask(__name__);app.config["MAX_CONTENT_LENGTH"]=25*1024*1024
 def db(): c=sqlite3.connect(DB);c.row_factory=sqlite3.Row;return c
 def init():
@@ -14,6 +17,8 @@ def init():
  CREATE TABLE IF NOT EXISTS tones(id TEXT PRIMARY KEY,name TEXT NOT NULL,prompt TEXT NOT NULL);
  CREATE TABLE IF NOT EXISTS settings(id INTEGER PRIMARY KEY CHECK(id=1),lm_url TEXT NOT NULL,lm_model TEXT NOT NULL,temperature REAL NOT NULL,max_tokens INTEGER NOT NULL,buffer_token TEXT,buffer_channel TEXT,lm_token TEXT DEFAULT '');
  CREATE TABLE IF NOT EXISTS drafts(id TEXT PRIMARY KEY,caption TEXT NOT NULL,scheduled_at TEXT NOT NULL,status TEXT NOT NULL,tone TEXT,subject TEXT,buffer_id TEXT,created_at TEXT NOT NULL);
+ CREATE TABLE IF NOT EXISTS asset_batches(id TEXT PRIMARY KEY,user_prompt TEXT NOT NULL,asset_type TEXT NOT NULL,visual_style TEXT NOT NULL,color_mode TEXT NOT NULL,created_at TEXT NOT NULL);
+ CREATE TABLE IF NOT EXISTS assets(id TEXT PRIMARY KEY,batch_id TEXT NOT NULL,user_prompt TEXT NOT NULL,enhanced_prompt TEXT NOT NULL,sub_prompt TEXT NOT NULL,asset_type TEXT NOT NULL,visual_style TEXT NOT NULL,color_mode TEXT NOT NULL,seed INTEGER NOT NULL,workflow_id TEXT NOT NULL,created_at TEXT NOT NULL,status TEXT NOT NULL,original_path TEXT,transparent_path TEXT,svg_path TEXT,transparency_status TEXT,vector_status TEXT,favorite INTEGER DEFAULT 0,error TEXT DEFAULT '');
  """)
  if "lm_token" not in [x[1] for x in c.execute("PRAGMA table_info(settings)").fetchall()]:c.execute("ALTER TABLE settings ADD COLUMN lm_token TEXT DEFAULT ''")
  settings_cols=[x[1] for x in c.execute("PRAGMA table_info(settings)").fetchall()]
@@ -60,7 +65,7 @@ def media(ident):
 @app.get("/api/state")
 def state():
  s=rows("SELECT * FROM settings WHERE id=1")[0];s["buffer_token"]="" if not s["buffer_token"] else "configured";s["lm_token"]="" if not s["lm_token"] else "configured"
- return jsonify(version=VERSION,library=rows("SELECT * FROM library ORDER BY created_at DESC"),tones=rows("SELECT * FROM tones ORDER BY name"),drafts=rows("SELECT * FROM drafts WHERE status IN ('pending','ready') ORDER BY scheduled_at"),settings=s)
+ return jsonify(version=VERSION,library=rows("SELECT * FROM library ORDER BY created_at DESC"),tones=rows("SELECT * FROM tones ORDER BY name"),drafts=rows("SELECT * FROM drafts WHERE status IN ('pending','ready') ORDER BY scheduled_at"),assets=rows("SELECT * FROM assets ORDER BY created_at DESC"),settings=s)
 @app.get("/api/buffer-queue")
 def buffer_queue():
  s=rows("SELECT * FROM settings WHERE id=1")[0]
@@ -216,8 +221,109 @@ def send_ready():
  for ident in ids:
   result=approve(ident);response,status=(result if isinstance(result,tuple) else (result,result.status_code))
   if status<400:sent.append(ident)
-  else:failed.append({"id":ident,"error":(response.get_json(silent=True) or {}).get("error","Unknown error")})
+ else:failed.append({"id":ident,"error":(response.get_json(silent=True) or {}).get("error","Unknown error")})
  return jsonify(sent=len(sent),failed=failed)
+
+ASSET_TYPES={"Mixed","Illustrations","Icons / symbols","Borders / frames","Background elements","Textures","Decorative shapes"}
+VISUAL_STYLES={"Auto","Punk / DIY","Grunge","Horror comic","Retro","Tattoo / flash","Screen print","Woodcut / linocut","Clean vector","Zine / photocopy"}
+COLOR_MODES={"Black only","Black + white","Limited color","Full color"}
+NEGATIVE_ASSET_PROMPT="complete flyer, complete poster, poster layout, advertisement, card, mockup, scene, room, landscape, backdrop, rectangular illustration, full-canvas background, frame, border, text, letters, words, watermark, logo, photograph of printed art, white box, black box, checkerboard pattern"
+
+def comfy_url():
+ configured=os.getenv("COMFYUI_URL","").strip()
+ if configured:return configured.rstrip("/")
+ lm=rows("SELECT lm_url FROM settings WHERE id=1")[0]["lm_url"]
+ parsed=urlsplit(lm);host=(parsed.hostname or "host.docker.internal")+((":"+str(os.getenv("COMFYUI_PORT","8188"))) if parsed.hostname else "")
+ return urlunsplit((parsed.scheme or "http",host,"","","")).rstrip("/")
+
+def update_asset(ident,**values):
+ if not values:return
+ c=db();c.execute("UPDATE assets SET "+",".join(f"{key}=?" for key in values)+" WHERE id=?",(*values.values(),ident));c.commit();c.close()
+
+def asset_prompt(user_prompt,asset_type,style,color,concept):
+ exception=asset_type=="Background elements"
+ isolation="full-canvas background is allowed" if exception else "isolated subject only, real transparent background, no environment, no canvas or rectangular background"
+ return f"Standalone decorative graphic asset inspired by: {user_prompt}. Concept: {concept}. Asset type: {asset_type}. Visual style: {style}. Color mode: {color}. {isolation}. Bold readable silhouette, separated foreground, clean negative space, vector-friendly shapes, high contrast, minimal gradients, screen-print ready, individual artwork intended to be placed into another layout."
+
+def concepts_for(prompt,asset_type):
+ words=[word.strip(".,!?()[]").lower() for word in prompt.split() if len(word.strip(".,!?()[]"))>2]
+ theme=" ".join(words[:5]) or "the requested theme"
+ if asset_type=="Borders / frames":forms=["torn circular border","distressed corner frame","chain border","rough ink oval","ornamental side rails","broken star frame"]
+ elif asset_type=="Textures":forms=["ink splatter overlay","torn paper distress","scratch marks","halftone dots","dry brush streaks","photocopy noise cluster"]
+ elif asset_type=="Icons / symbols":forms=["bold emblem","simple symbolic mark","radiating icon","crossed-object symbol","distressed badge element","stencil pictogram"]
+ else:forms=["hero character or object","bold emblematic object","dynamic hand-held object","creature or mascot","decorative motif","supporting symbol cluster"]
+ return [f"{form} expressing {theme}" for form in forms]
+
+def run_asset(ident):
+ item=rows("SELECT * FROM assets WHERE id=?",(ident,))
+ if not item:return
+ item=item[0];folder=ASSETS/item["created_at"][:4]/item["created_at"][5:7]/ident;folder.mkdir(parents=True,exist_ok=True)
+ original=folder/"original.png";transparent=folder/"transparent.png";svg=folder/"asset.svg"
+ try:
+  client=ComfyUIClient(comfy_url(),ROOT/"workflows"/"asset-generator.json",ROOT/"workflows"/"asset-generator.mapping.json")
+  raw=client.generate(item["enhanced_prompt"],NEGATIVE_ASSET_PROMPT,item["seed"],on_status=lambda status:update_asset(ident,status=status))
+  original.write_bytes(raw);update_asset(ident,original_path=str(original.relative_to(DATA)),status="isolating",transparency_status="processing")
+  if item["asset_type"]=="Background elements":
+   from PIL import Image
+   Image.open(original).convert("RGBA").save(transparent,"PNG")
+  else:isolate_background(original,transparent)
+  update_asset(ident,transparent_path=str(transparent.relative_to(DATA)),transparency_status="complete",status="vectorizing",vector_status="processing")
+  try:
+   vectorize_png(transparent,svg);update_asset(ident,svg_path=str(svg.relative_to(DATA)),vector_status="complete",status="complete",error="")
+  except Exception as exc:update_asset(ident,vector_status="failed",status="complete_png_only",error=f"SVG unavailable: {exc}")
+ except Exception as exc:
+  status="background_failed" if original.exists() else "failed"
+  update_asset(ident,status=status,transparency_status="failed" if original.exists() else "pending",error=str(exc))
+
+def start_asset(ident):threading.Thread(target=run_asset,args=(ident,),daemon=True).start()
+
+def create_asset_records(payload,concepts,batch_id=None):
+ now=datetime.now(timezone.utc).isoformat();batch_id=batch_id or str(uuid.uuid4());created=[];c=db()
+ if not c.execute("SELECT 1 FROM asset_batches WHERE id=?",(batch_id,)).fetchone():c.execute("INSERT INTO asset_batches VALUES(?,?,?,?,?,?)",(batch_id,payload["prompt"],payload["asset_type"],payload["visual_style"],payload["color_mode"],now))
+ for concept in concepts:
+  ident=str(uuid.uuid4());seed=random.SystemRandom().randrange(1,2**63-1);enhanced=asset_prompt(payload["prompt"],payload["asset_type"],payload["visual_style"],payload["color_mode"],concept)
+  c.execute("INSERT INTO assets(id,batch_id,user_prompt,enhanced_prompt,sub_prompt,asset_type,visual_style,color_mode,seed,workflow_id,created_at,status,transparency_status,vector_status) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",(ident,batch_id,payload["prompt"],enhanced,concept,payload["asset_type"],payload["visual_style"],payload["color_mode"],seed,"asset-generator",now,"queued","pending","pending"));created.append(ident)
+ c.commit();c.close()
+ for ident in created:start_asset(ident)
+ return batch_id,created
+
+@app.post("/api/assets/generate")
+def generate_assets():
+ x=request.get_json(force=True);prompt=str(x.get("prompt","")).strip()
+ if not prompt or len(prompt)>2000:return jsonify(error="Describe the vibe or assets you need (maximum 2,000 characters)"),400
+ payload={"prompt":prompt,"asset_type":x.get("asset_type","Mixed"),"visual_style":x.get("visual_style","Auto"),"color_mode":x.get("color_mode","Black + white")}
+ if payload["asset_type"] not in ASSET_TYPES or payload["visual_style"] not in VISUAL_STYLES or payload["color_mode"] not in COLOR_MODES:return jsonify(error="Invalid asset settings"),400
+ batch,created=create_asset_records(payload,concepts_for(prompt,payload["asset_type"]));return jsonify(batch_id=batch,created=created),202
+
+@app.post("/api/assets/more")
+def more_assets():
+ x=request.get_json(force=True);batch=rows("SELECT * FROM asset_batches WHERE id=?",(x.get("batch_id"),))
+ if not batch:return jsonify(error="Asset batch not found"),404
+ b=batch[0];payload={"prompt":b["user_prompt"],"asset_type":b["asset_type"],"visual_style":b["visual_style"],"color_mode":b["color_mode"]};_,created=create_asset_records(payload,[c+f" variation {random.randrange(100,999)}" for c in concepts_for(b["user_prompt"],b["asset_type"])],b["id"]);return jsonify(created=created),202
+
+@app.post("/api/assets/<ident>/regenerate")
+def regenerate_asset(ident):
+ item=rows("SELECT * FROM assets WHERE id=?",(ident,))
+ if not item:return jsonify(error="Asset not found"),404
+ a=item[0];payload={"prompt":a["user_prompt"],"asset_type":a["asset_type"],"visual_style":a["visual_style"],"color_mode":a["color_mode"]};_,created=create_asset_records(payload,[a["sub_prompt"]+" fresh composition"],a["batch_id"]);return jsonify(id=created[0]),202
+
+@app.post("/api/assets/<ident>/favorite")
+def favorite_asset(ident):
+ c=db();changed=c.execute("UPDATE assets SET favorite=CASE favorite WHEN 1 THEN 0 ELSE 1 END WHERE id=?",(ident,)).rowcount;c.commit();c.close();return jsonify(ok=True) if changed else (jsonify(error="Asset not found"),404)
+
+@app.delete("/api/assets/<ident>")
+def delete_asset(ident):
+ c=db();changed=c.execute("DELETE FROM assets WHERE id=?",(ident,)).rowcount;c.commit();c.close();return jsonify(ok=True) if changed else (jsonify(error="Asset not found"),404)
+
+@app.get("/assets/<ident>/<kind>")
+def asset_file(ident,kind):
+ column={"png":"transparent_path","svg":"svg_path","original":"original_path"}.get(kind)
+ if not column:return jsonify(error="Invalid asset file"),404
+ item=rows(f"SELECT {column},sub_prompt FROM assets WHERE id=?",(ident,))
+ if not item or not item[0][column]:return jsonify(error="Asset file unavailable"),404
+ path=(DATA/item[0][column]).resolve()
+ if DATA.resolve() not in path.parents:return jsonify(error="Invalid asset path"),403
+ return send_file(path,as_attachment=request.args.get("download")=="1",download_name=f"social-copilot-asset-{ident[:8]}.{kind if kind!='original' else 'png'}")
 @app.errorhandler(Exception)
 def unexpected_error(error):
  app.logger.exception("Unhandled application error")
