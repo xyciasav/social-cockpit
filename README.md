@@ -9,7 +9,7 @@ Deploy a Git-backed stack using this repository, branch `main`, and `docker-comp
 The stack pulls the explicitly versioned image:
 
 ```text
-ghcr.io/xyciasav/social-cockpit:1.11.0
+ghcr.io/xyciasav/social-cockpit:1.11.1
 ```
 
 Open `http://SERVER_IP:38427`, then configure LM Studio and Buffer under Settings.
@@ -24,4 +24,4 @@ The Asset Generator creates six varied standalone concepts, polls ComfyUI, remov
 
 Export your ComfyUI workflow in **API format** to `workflows/asset-generator.json`, then fill in the node IDs in `workflows/asset-generator.mapping.json`. The mapping supports positive prompt, negative prompt, seed, optional width/height, and output nodes.
 
-By default the app derives the ComfyUI host from the configured LM Studio URL and uses `COMFYUI_PORT=8188`. Set `COMFYUI_URL` only if that derivation is not correct (for example, `http://comfyui:8188` on a shared Docker network).
+By default the app connects to ComfyUI on the Docker host at `http://host.docker.internal:8188`. Change the ComfyUI URL in Settings only when it runs elsewhere (for example, `http://comfyui:8188` on a shared Docker network). ComfyUI must listen on `0.0.0.0`, not only `127.0.0.1`.
