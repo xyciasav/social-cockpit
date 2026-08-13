@@ -4,7 +4,7 @@ from pathlib import Path
 from flask import Flask, jsonify, render_template, request, send_file
 import requests
 
-VERSION="1.9.0"; ROOT=Path(__file__).parent; DATA=Path(os.getenv("DATA_DIR",ROOT/"data")); UPLOADS=DATA/"uploads"; DB=DATA/"social-cockpit.db"
+VERSION="1.10.0"; ROOT=Path(__file__).parent; DATA=Path(os.getenv("DATA_DIR",ROOT/"data")); UPLOADS=DATA/"uploads"; DB=DATA/"social-cockpit.db"
 DATA.mkdir(exist_ok=True);UPLOADS.mkdir(exist_ok=True)
 app=Flask(__name__);app.config["MAX_CONTENT_LENGTH"]=25*1024*1024
 def db(): c=sqlite3.connect(DB);c.row_factory=sqlite3.Row;return c
@@ -43,6 +43,13 @@ def rows(sql,args=()): c=db();r=[dict(x) for x in c.execute(sql,args).fetchall()
 def web_url(value):
  value=(value or "").strip()
  return value if not value or value.startswith(("http://","https://")) else "https://"+value
+def buffer_call(token,query,variables=None):
+ r=requests.post("https://api.buffer.com",headers={"Authorization":"Bearer "+token},json={"query":query,"variables":variables or {}},timeout=60)
+ try:result=r.json()
+ except ValueError:raise ValueError(f"Buffer returned {r.status_code}: {r.text[:300]}")
+ if not r.ok:raise ValueError((result.get("errors") or [{}])[0].get("message",f"Buffer returned HTTP {r.status_code}"))
+ if result.get("errors"):raise ValueError(result["errors"][0].get("message","Buffer query failed"))
+ return result.get("data") or {}
 @app.get("/")
 def home(): return render_template("index.html",version=VERSION)
 @app.get("/media/<ident>")
@@ -54,6 +61,23 @@ def media(ident):
 def state():
  s=rows("SELECT * FROM settings WHERE id=1")[0];s["buffer_token"]="" if not s["buffer_token"] else "configured";s["lm_token"]="" if not s["lm_token"] else "configured"
  return jsonify(version=VERSION,library=rows("SELECT * FROM library ORDER BY created_at DESC"),tones=rows("SELECT * FROM tones ORDER BY name"),drafts=rows("SELECT * FROM drafts WHERE status IN ('pending','ready') ORDER BY scheduled_at"),settings=s)
+@app.get("/api/buffer-queue")
+def buffer_queue():
+ s=rows("SELECT * FROM settings WHERE id=1")[0]
+ if not s["buffer_token"]:return jsonify(error="Configure the Buffer API key in Settings"),400
+ channel_ids=list(dict.fromkeys(filter(None,[s["facebook_channel"] or s["buffer_channel"],s["instagram_channel"]])))
+ if not channel_ids:return jsonify(error="Configure at least one Buffer channel ID in Settings"),400
+ try:
+  account=buffer_call(s["buffer_token"],"query { account { organizations { id name } } }");organizations=(account.get("account") or {}).get("organizations") or [];posts=[]
+  query="""query Queue($organization:OrganizationId!,$channels:[ChannelId!]!){posts(first:100,input:{organizationId:$organization,sort:[{field:dueAt,direction:asc}],filter:{status:[scheduled],channelIds:$channels}}){edges{node{id text dueAt channelId}}}}"""
+  for organization in organizations:
+   try:
+    data=buffer_call(s["buffer_token"],query,{"organization":organization["id"],"channels":channel_ids});posts.extend(edge["node"] for edge in (data.get("posts") or {}).get("edges",[]))
+   except ValueError:continue
+  labels={s["facebook_channel"] or s["buffer_channel"]:"Facebook",s["instagram_channel"]:"Instagram"};seen={}
+  for post in posts:seen[post["id"]]={**post,"platform":labels.get(post.get("channelId"),"Buffer")}
+  return jsonify(posts=sorted(seen.values(),key=lambda post:post.get("dueAt") or ""))
+ except (requests.RequestException,ValueError,KeyError) as e:return jsonify(error=f"Could not load Buffer queue: {e}"),502
 @app.post("/api/library")
 def add_library():
  if request.content_type and "multipart" in request.content_type:
