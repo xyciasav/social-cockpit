@@ -7,7 +7,7 @@ from urllib.parse import urlsplit, urlunsplit
 from comfyui_client import ComfyUIClient, ComfyUIError
 from asset_processing import isolate_background, vectorize_png
 
-VERSION="1.11.0"; ROOT=Path(__file__).parent; DATA=Path(os.getenv("DATA_DIR",ROOT/"data")); UPLOADS=DATA/"uploads"; ASSETS=DATA/"generated-assets"; DB=DATA/"social-cockpit.db"
+VERSION="1.11.1"; ROOT=Path(__file__).parent; DATA=Path(os.getenv("DATA_DIR",ROOT/"data")); UPLOADS=DATA/"uploads"; ASSETS=DATA/"generated-assets"; DB=DATA/"social-cockpit.db"
 DATA.mkdir(exist_ok=True);UPLOADS.mkdir(exist_ok=True);ASSETS.mkdir(exist_ok=True)
 app=Flask(__name__);app.config["MAX_CONTENT_LENGTH"]=25*1024*1024
 def db(): c=sqlite3.connect(DB);c.row_factory=sqlite3.Row;return c
@@ -24,6 +24,8 @@ def init():
  settings_cols=[x[1] for x in c.execute("PRAGMA table_info(settings)").fetchall()]
  for column in ("facebook_channel","instagram_channel","public_url"):
   if column not in settings_cols:c.execute(f"ALTER TABLE settings ADD COLUMN {column} TEXT DEFAULT ''")
+ if "comfyui_url" not in settings_cols:c.execute("ALTER TABLE settings ADD COLUMN comfyui_url TEXT DEFAULT 'http://host.docker.internal:8188'")
+ c.execute("UPDATE settings SET comfyui_url='http://host.docker.internal:8188' WHERE comfyui_url IS NULL OR comfyui_url='' ")
  draft_cols=[x[1] for x in c.execute("PRAGMA table_info(drafts)").fetchall()]
  if "platforms" not in draft_cols:c.execute("ALTER TABLE drafts ADD COLUMN platforms TEXT DEFAULT 'facebook'")
  if "media_id" not in draft_cols:c.execute("ALTER TABLE drafts ADD COLUMN media_id TEXT DEFAULT ''")
@@ -117,7 +119,9 @@ def del_tone(ident): c=db();c.execute("DELETE FROM tones WHERE id=?",(ident,));c
 @app.put("/api/settings")
 def settings():
  x=request.get_json(force=True);c=db();old=c.execute("SELECT * FROM settings WHERE id=1").fetchone();token=x.get("buffer_token","");token=old["buffer_token"] if token=="configured" else token;lm_token=x.get("lm_token","");lm_token=old["lm_token"] if lm_token=="configured" else lm_token
- c.execute("UPDATE settings SET lm_url=?,lm_model=?,temperature=?,max_tokens=?,buffer_token=?,buffer_channel=?,lm_token=?,facebook_channel=?,instagram_channel=?,public_url=? WHERE id=1",(x["lm_url"].rstrip("/").removesuffix("/v1"),x["lm_model"],float(x["temperature"]),int(x["max_tokens"]),token,x.get("buffer_channel",""),lm_token,x.get("facebook_channel",""),x.get("instagram_channel",""),x.get("public_url","").rstrip("/")));c.commit();c.close();return jsonify(ok=True)
+ comfy=(x.get("comfyui_url") or "http://host.docker.internal:8188").rstrip("/")
+ if not comfy.startswith(("http://","https://")):return jsonify(error="ComfyUI URL must start with http:// or https://"),400
+ c.execute("UPDATE settings SET lm_url=?,lm_model=?,temperature=?,max_tokens=?,buffer_token=?,buffer_channel=?,lm_token=?,facebook_channel=?,instagram_channel=?,public_url=?,comfyui_url=? WHERE id=1",(x["lm_url"].rstrip("/").removesuffix("/v1"),x["lm_model"],float(x["temperature"]),int(x["max_tokens"]),token,x.get("buffer_channel",""),lm_token,x.get("facebook_channel",""),x.get("instagram_channel",""),x.get("public_url","").rstrip("/"),comfy));c.commit();c.close();return jsonify(ok=True)
 def extract_json(text):
  text=text.strip();text=text.removeprefix("```json").removeprefix("```").removesuffix("```").strip()
  try:return json.loads(text)
@@ -232,9 +236,17 @@ NEGATIVE_ASSET_PROMPT="complete flyer, complete poster, poster layout, advertise
 def comfy_url():
  configured=os.getenv("COMFYUI_URL","").strip()
  if configured:return configured.rstrip("/")
- lm=rows("SELECT lm_url FROM settings WHERE id=1")[0]["lm_url"]
- parsed=urlsplit(lm);host=(parsed.hostname or "host.docker.internal")+((":"+str(os.getenv("COMFYUI_PORT","8188"))) if parsed.hostname else "")
- return urlunsplit((parsed.scheme or "http",host,"","","")).rstrip("/")
+ configured=rows("SELECT comfyui_url FROM settings WHERE id=1")[0].get("comfyui_url","").strip()
+ return configured.rstrip("/") if configured else f"http://host.docker.internal:{os.getenv('COMFYUI_PORT','8188')}"
+
+@app.get("/api/assets/health")
+def asset_health():
+ url=comfy_url()
+ try:
+  response=requests.get(url+"/system_stats",timeout=5);response.raise_for_status()
+  return jsonify(ok=True,url=url,message="ComfyUI is connected")
+ except requests.RequestException as exc:
+  return jsonify(error=f"Cannot connect to ComfyUI at {url}. On the ComfyUI server, start it with --listen 0.0.0.0 --port 8188, then try again. ({exc})",url=url),503
 
 def update_asset(ident,**values):
  if not values:return

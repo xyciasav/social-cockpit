@@ -34,3 +34,18 @@ def test_rejects_bad_controls():
     client=app.app.test_client()
     response=client.post("/api/assets/generate",json={"prompt":"test","asset_type":"anything"})
     assert response.status_code==400
+
+
+def test_comfyui_defaults_to_docker_host(monkeypatch):
+    monkeypatch.delenv("COMFYUI_URL", raising=False)
+    assert app.comfy_url()=="http://host.docker.internal:8188"
+
+
+def test_comfyui_health_has_actionable_failure(monkeypatch):
+    class Failure:
+        def __call__(self,*args,**kwargs):
+            raise app.requests.ConnectionError("offline")
+    monkeypatch.setattr(app.requests,"get",Failure())
+    response=app.app.test_client().get("/api/assets/health")
+    assert response.status_code==503
+    assert "--listen 0.0.0.0 --port 8188" in response.json["error"]
