@@ -7,7 +7,7 @@ from urllib.parse import urlsplit, urlunsplit
 from comfyui_client import ComfyUIClient, ComfyUIError
 from asset_processing import isolate_background, vectorize_png
 
-VERSION="1.11.1"; ROOT=Path(__file__).parent; DATA=Path(os.getenv("DATA_DIR",ROOT/"data")); UPLOADS=DATA/"uploads"; ASSETS=DATA/"generated-assets"; DB=DATA/"social-cockpit.db"
+VERSION="1.11.2"; ROOT=Path(__file__).parent; DATA=Path(os.getenv("DATA_DIR",ROOT/"data")); UPLOADS=DATA/"uploads"; ASSETS=DATA/"generated-assets"; DB=DATA/"social-cockpit.db"
 DATA.mkdir(exist_ok=True);UPLOADS.mkdir(exist_ok=True);ASSETS.mkdir(exist_ok=True)
 app=Flask(__name__);app.config["MAX_CONTENT_LENGTH"]=25*1024*1024
 def db(): c=sqlite3.connect(DB);c.row_factory=sqlite3.Row;return c
@@ -234,9 +234,9 @@ COLOR_MODES={"Black only","Black + white","Limited color","Full color"}
 NEGATIVE_ASSET_PROMPT="complete flyer, complete poster, poster layout, advertisement, card, mockup, scene, room, landscape, backdrop, rectangular illustration, full-canvas background, frame, border, text, letters, words, watermark, logo, photograph of printed art, white box, black box, checkerboard pattern"
 
 def comfy_url():
- configured=os.getenv("COMFYUI_URL","").strip()
- if configured:return configured.rstrip("/")
  configured=rows("SELECT comfyui_url FROM settings WHERE id=1")[0].get("comfyui_url","").strip()
+ if configured:return configured.rstrip("/")
+ configured=os.getenv("COMFYUI_URL","").strip()
  return configured.rstrip("/") if configured else f"http://host.docker.internal:{os.getenv('COMFYUI_PORT','8188')}"
 
 @app.get("/api/assets/health")

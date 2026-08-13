@@ -41,6 +41,17 @@ def test_comfyui_defaults_to_docker_host(monkeypatch):
     assert app.comfy_url()=="http://host.docker.internal:8188"
 
 
+def test_saved_comfyui_url_overrides_container_default(monkeypatch):
+    monkeypatch.setenv("COMFYUI_URL","http://host.docker.internal:8188")
+    client=app.app.test_client()
+    state=client.get("/api/state").json
+    settings=state["settings"]
+    settings["comfyui_url"]="http://10.0.0.156:8188"
+    response=client.put("/api/settings",json=settings)
+    assert response.status_code==200
+    assert app.comfy_url()=="http://10.0.0.156:8188"
+
+
 def test_comfyui_health_has_actionable_failure(monkeypatch):
     class Failure:
         def __call__(self,*args,**kwargs):

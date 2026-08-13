@@ -1,6 +1,6 @@
 services:
   social-cockpit:
-    image: ghcr.io/xyciasav/social-cockpit:${APP_VERSION:-1.11.1}
+    image: ghcr.io/xyciasav/social-cockpit:${APP_VERSION:-1.11.2}
     container_name: social-cockpit
     restart: unless-stopped
     ports:
@@ -10,7 +10,7 @@ services:
     environment:
       DATA_DIR: /app/data
       COMFYUI_PORT: ${COMFYUI_PORT:-8188}
-      COMFYUI_URL: ${COMFYUI_URL:-http://host.docker.internal:8188}
+      COMFYUI_URL: ${COMFYUI_URL:-}
     volumes:
       - social-cockpit-data:/app/data
 volumes:
