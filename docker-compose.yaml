@@ -1,6 +1,6 @@
 services:
   social-cockpit:
-    image: ghcr.io/xyciasav/social-cockpit:${APP_VERSION:-1.10.0}
+    image: ghcr.io/xyciasav/social-cockpit:${APP_VERSION:-1.11.0}
     container_name: social-cockpit
     restart: unless-stopped
     ports:
@@ -9,6 +9,8 @@ services:
       - "host.docker.internal:host-gateway"
     environment:
       DATA_DIR: /app/data
+      COMFYUI_PORT: ${COMFYUI_PORT:-8188}
+      # Set COMFYUI_URL only when ComfyUI is not on the LM Studio host.
     volumes:
       - social-cockpit-data:/app/data
 volumes:

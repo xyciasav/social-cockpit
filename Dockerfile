@@ -1,10 +1,11 @@
 FROM python:3.12-slim
-ARG APP_VERSION=1.10.0
+ARG APP_VERSION=1.11.0
 LABEL org.opencontainers.image.title="Social Cockpit" org.opencontainers.image.version=$APP_VERSION org.opencontainers.image.source="https://github.com/xyciasav/social-cockpit"
 WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
-COPY app.py .
+COPY app.py comfyui_client.py asset_processing.py ./
+COPY workflows ./workflows
 COPY templates ./templates
 COPY static ./static
 RUN mkdir -p /app/data && chown -R nobody:nogroup /app
