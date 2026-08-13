@@ -16,6 +16,7 @@ def test_transparency_and_real_svg(tmp_path):
     isolate_background(original,transparent)
     result=Image.open(transparent)
     assert result.mode=="RGBA" and result.getpixel((0,0))[3]==0 and result.getpixel((64,64))[3]>0
+    assert result.width<128 and result.height<128
     vectorize_png(transparent,svg)
     root=ET.parse(svg).getroot();tags=[node.tag.rsplit("}",1)[-1] for node in root.iter()]
     assert "path" in tags and "image" not in tags and "rect" not in tags
@@ -34,6 +35,17 @@ def test_rejects_bad_controls():
     client=app.app.test_client()
     response=client.post("/api/assets/generate",json={"prompt":"test","asset_type":"anything"})
     assert response.status_code==400
+
+
+def test_halloween_batch_uses_concrete_single_subjects():
+    concepts=app.concepts_for("punk halloween concert","Mixed")
+    assert len(concepts)==6
+    assert any("skeleton guitarist" in concept for concept in concepts)
+    assert any("skeletal hand" in concept for concept in concepts)
+    assert all("one " in concept for concept in concepts)
+    prompt=app.asset_prompt("punk halloween concert","Mixed","Punk / DIY","Black + white",concepts[0])
+    assert "No typography of any kind" in prompt
+    assert "only focal object" in prompt
 
 
 def test_comfyui_defaults_to_docker_host(monkeypatch):

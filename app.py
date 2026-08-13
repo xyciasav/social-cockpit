@@ -7,7 +7,7 @@ from urllib.parse import urlsplit, urlunsplit
 from comfyui_client import ComfyUIClient, ComfyUIError
 from asset_processing import isolate_background, vectorize_png
 
-VERSION="1.11.2"; ROOT=Path(__file__).parent; DATA=Path(os.getenv("DATA_DIR",ROOT/"data")); UPLOADS=DATA/"uploads"; ASSETS=DATA/"generated-assets"; DB=DATA/"social-cockpit.db"
+VERSION="1.11.3"; ROOT=Path(__file__).parent; DATA=Path(os.getenv("DATA_DIR",ROOT/"data")); UPLOADS=DATA/"uploads"; ASSETS=DATA/"generated-assets"; DB=DATA/"social-cockpit.db"
 DATA.mkdir(exist_ok=True);UPLOADS.mkdir(exist_ok=True);ASSETS.mkdir(exist_ok=True)
 app=Flask(__name__);app.config["MAX_CONTENT_LENGTH"]=25*1024*1024
 def db(): c=sqlite3.connect(DB);c.row_factory=sqlite3.Row;return c
@@ -231,7 +231,7 @@ def send_ready():
 ASSET_TYPES={"Mixed","Illustrations","Icons / symbols","Borders / frames","Background elements","Textures","Decorative shapes"}
 VISUAL_STYLES={"Auto","Punk / DIY","Grunge","Horror comic","Retro","Tattoo / flash","Screen print","Woodcut / linocut","Clean vector","Zine / photocopy"}
 COLOR_MODES={"Black only","Black + white","Limited color","Full color"}
-NEGATIVE_ASSET_PROMPT="complete flyer, complete poster, poster layout, advertisement, card, mockup, scene, room, landscape, backdrop, rectangular illustration, full-canvas background, frame, border, text, letters, words, watermark, logo, photograph of printed art, white box, black box, checkerboard pattern"
+NEGATIVE_ASSET_PROMPT="typography, text, readable text, gibberish text, letters, words, captions, labels, title, logo, complete flyer, complete poster, poster layout, advertisement, card, mockup, scene, room, landscape, backdrop, crowd, band lineup, multiple characters, group portrait, ground line, stage, rectangular illustration, full-canvas background, frame, border, photograph of printed art, white box, black box, checkerboard pattern"
 
 def comfy_url():
  configured=rows("SELECT comfyui_url FROM settings WHERE id=1")[0].get("comfyui_url","").strip()
@@ -254,17 +254,22 @@ def update_asset(ident,**values):
 
 def asset_prompt(user_prompt,asset_type,style,color,concept):
  exception=asset_type=="Background elements"
- isolation="full-canvas background is allowed" if exception else "isolated subject only, real transparent background, no environment, no canvas or rectangular background"
- return f"Standalone decorative graphic asset inspired by: {user_prompt}. Concept: {concept}. Asset type: {asset_type}. Visual style: {style}. Color mode: {color}. {isolation}. Bold readable silhouette, separated foreground, clean negative space, vector-friendly shapes, high contrast, minimal gradients, screen-print ready, individual artwork intended to be placed into another layout."
+ isolation="full-canvas background is allowed" if exception else "ONE isolated subject only on a plain removable background, no environment, no scene, no floor or ground line, no canvas or rectangular background"
+ return f"Create this exact standalone decorative asset: {concept}. Overall direction: {user_prompt}. Asset type: {asset_type}. Visual style: {style}. Color mode: {color}. {isolation}. No typography of any kind: no text, letters, words, title, logo, label, or fake writing. Do not make a flyer or poster. Do not add a crowd, band, extra characters, scenery, stage, frame, or surrounding composition. The requested subject must be the only focal object, centered with generous empty space around it. Preserve handmade character through distressed ink, rough photocopy texture, uneven screen-print edges, or expressive linework when appropriate. Strong silhouette, recognizable internal detail, clean negative space, limited shading, vector-friendly shapes, high contrast, screen-print ready. Artwork only, designed to be placed into another layout."
 
 def concepts_for(prompt,asset_type):
  words=[word.strip(".,!?()[]").lower() for word in prompt.split() if len(word.strip(".,!?()[]"))>2]
  theme=" ".join(words[:5]) or "the requested theme"
- if asset_type=="Borders / frames":forms=["torn circular border","distressed corner frame","chain border","rough ink oval","ornamental side rails","broken star frame"]
+ prompt_lower=prompt.lower()
+ if "halloween" in prompt_lower:
+  forms=["one skeleton guitarist in an energetic wide-legged pose","one bat with safety-pin wings","one skeletal hand gripping a wired microphone","one jack-o'-lantern with a liberty-spike mohawk","one upright coffin wrapped in a single broken chain","one dripping lightning bolt decorated with two tiny skull accents"]
+ elif "protest" in prompt_lower or "civic" in prompt_lower or "politic" in prompt_lower:
+  forms=["one raised fist gripping a torn ballot","one cracked megaphone with radiating ink lines","one distressed star wrapped in a chain","one hand holding a lightning-bolt placard with no writing","one flying dove carrying a safety pin","one bold voting-box symbol with a rough check mark"]
+ elif asset_type=="Borders / frames":forms=["one torn circular border","one distressed corner frame","one chain border","one rough ink oval","one pair of ornamental side rails","one broken-star frame"]
  elif asset_type=="Textures":forms=["ink splatter overlay","torn paper distress","scratch marks","halftone dots","dry brush streaks","photocopy noise cluster"]
- elif asset_type=="Icons / symbols":forms=["bold emblem","simple symbolic mark","radiating icon","crossed-object symbol","distressed badge element","stencil pictogram"]
- else:forms=["hero character or object","bold emblematic object","dynamic hand-held object","creature or mascot","decorative motif","supporting symbol cluster"]
- return [f"{form} expressing {theme}" for form in forms]
+ elif asset_type=="Icons / symbols":forms=["one bold emblematic symbol","one simple hand-drawn icon","one radiating symbolic object","one pair of crossed thematic objects","one distressed badge-shaped symbol with no text","one stencil-style pictogram"]
+ else:forms=["one expressive mascot holding a thematic object","one bold emblematic object","one hand gripping a thematic object","one distinctive creature or mascot","one decorative thematic motif","one compact symbolic object"]
+ return [f"{form}, clearly expressing {theme}" for form in forms]
 
 def run_asset(ident):
  item=rows("SELECT * FROM assets WHERE id=?",(ident,))
