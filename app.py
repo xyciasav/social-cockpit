@@ -7,7 +7,7 @@ from urllib.parse import urlsplit, urlunsplit
 from comfyui_client import ComfyUIClient, ComfyUIError
 from asset_processing import isolate_background, vectorize_png
 
-VERSION="1.11.3"; ROOT=Path(__file__).parent; DATA=Path(os.getenv("DATA_DIR",ROOT/"data")); UPLOADS=DATA/"uploads"; ASSETS=DATA/"generated-assets"; DB=DATA/"social-cockpit.db"
+VERSION="1.12.0"; ROOT=Path(__file__).parent; DATA=Path(os.getenv("DATA_DIR",ROOT/"data")); UPLOADS=DATA/"uploads"; ASSETS=DATA/"generated-assets"; DB=DATA/"social-cockpit.db"
 DATA.mkdir(exist_ok=True);UPLOADS.mkdir(exist_ok=True);ASSETS.mkdir(exist_ok=True)
 app=Flask(__name__);app.config["MAX_CONTENT_LENGTH"]=25*1024*1024
 def db(): c=sqlite3.connect(DB);c.row_factory=sqlite3.Row;return c
@@ -17,6 +17,7 @@ def init():
  CREATE TABLE IF NOT EXISTS tones(id TEXT PRIMARY KEY,name TEXT NOT NULL,prompt TEXT NOT NULL);
  CREATE TABLE IF NOT EXISTS settings(id INTEGER PRIMARY KEY CHECK(id=1),lm_url TEXT NOT NULL,lm_model TEXT NOT NULL,temperature REAL NOT NULL,max_tokens INTEGER NOT NULL,buffer_token TEXT,buffer_channel TEXT,lm_token TEXT DEFAULT '');
  CREATE TABLE IF NOT EXISTS drafts(id TEXT PRIMARY KEY,caption TEXT NOT NULL,scheduled_at TEXT NOT NULL,status TEXT NOT NULL,tone TEXT,subject TEXT,buffer_id TEXT,created_at TEXT NOT NULL);
+ CREATE TABLE IF NOT EXISTS library_media(id TEXT PRIMARY KEY,library_id TEXT NOT NULL,kind TEXT NOT NULL,value TEXT NOT NULL,filename TEXT,created_at TEXT NOT NULL);
  CREATE TABLE IF NOT EXISTS asset_batches(id TEXT PRIMARY KEY,user_prompt TEXT NOT NULL,asset_type TEXT NOT NULL,visual_style TEXT NOT NULL,color_mode TEXT NOT NULL,created_at TEXT NOT NULL);
  CREATE TABLE IF NOT EXISTS assets(id TEXT PRIMARY KEY,batch_id TEXT NOT NULL,user_prompt TEXT NOT NULL,enhanced_prompt TEXT NOT NULL,sub_prompt TEXT NOT NULL,asset_type TEXT NOT NULL,visual_style TEXT NOT NULL,color_mode TEXT NOT NULL,seed INTEGER NOT NULL,workflow_id TEXT NOT NULL,created_at TEXT NOT NULL,status TEXT NOT NULL,original_path TEXT,transparent_path TEXT,svg_path TEXT,transparency_status TEXT,vector_status TEXT,favorite INTEGER DEFAULT 0,error TEXT DEFAULT '');
  """)
@@ -50,6 +51,25 @@ def rows(sql,args=()): c=db();r=[dict(x) for x in c.execute(sql,args).fetchall()
 def web_url(value):
  value=(value or "").strip()
  return value if not value or value.startswith(("http://","https://")) else "https://"+value
+def add_media(c,library_id,files,urls):
+ now=datetime.now(timezone.utc).isoformat()
+ for value in urls:
+  value=web_url(value)
+  if value:c.execute("INSERT INTO library_media VALUES(?,?,?,?,?,?)",(str(uuid.uuid4()),library_id,"url",value,None,now))
+ for f in files:
+  if not f or not f.filename:continue
+  media_id=str(uuid.uuid4());name=Path(f.filename).name;f.save(UPLOADS/f"{media_id}-{name}");c.execute("INSERT INTO library_media VALUES(?,?,?,?,?,?)",(media_id,library_id,"upload","",name,now))
+def media_for(library_id,c=None):
+ owned=c is None;c=c or db();items=[dict(x) for x in c.execute("SELECT * FROM library_media WHERE library_id=? ORDER BY created_at,id",(library_id,)).fetchall()]
+ old=c.execute("SELECT filename,image_url FROM library WHERE id=?",(library_id,)).fetchone()
+ if old:
+  if old["image_url"]:items.insert(0,{"id":"legacy-url","library_id":library_id,"kind":"url","value":old["image_url"],"filename":None})
+  if old["filename"]:items.insert(0,{"id":"legacy-upload","library_id":library_id,"kind":"legacy","value":"","filename":old["filename"]})
+ if owned:c.close()
+ return items
+def enrich_library(items):
+ for item in items:item["media"]=media_for(item["id"])
+ return items
 def buffer_call(token,query,variables=None):
  r=requests.post("https://api.buffer.com",headers={"Authorization":"Bearer "+token},json={"query":query,"variables":variables or {}},timeout=60)
  try:result=r.json()
@@ -64,10 +84,15 @@ def media(ident):
  item=rows("SELECT filename FROM library WHERE id=?",(ident,))
  if not item or not item[0]["filename"]:return jsonify(error="Media not found"),404
  return send_file(UPLOADS/f"{ident}-{item[0]['filename']}")
+@app.get("/media-file/<ident>")
+def media_file(ident):
+ item=rows("SELECT filename FROM library_media WHERE id=? AND kind='upload'",(ident,))
+ if not item:return jsonify(error="Media not found"),404
+ return send_file(UPLOADS/f"{ident}-{item[0]['filename']}")
 @app.get("/api/state")
 def state():
  s=rows("SELECT * FROM settings WHERE id=1")[0];s["buffer_token"]="" if not s["buffer_token"] else "configured";s["lm_token"]="" if not s["lm_token"] else "configured"
- return jsonify(version=VERSION,library=rows("SELECT * FROM library ORDER BY created_at DESC"),tones=rows("SELECT * FROM tones ORDER BY name"),drafts=rows("SELECT * FROM drafts WHERE status IN ('pending','ready') ORDER BY scheduled_at"),assets=rows("SELECT * FROM assets ORDER BY created_at DESC"),settings=s)
+ return jsonify(version=VERSION,library=enrich_library(rows("SELECT * FROM library ORDER BY created_at DESC")),tones=rows("SELECT * FROM tones ORDER BY name"),drafts=rows("SELECT * FROM drafts WHERE status IN ('pending','ready') ORDER BY scheduled_at"),assets=rows("SELECT * FROM assets ORDER BY created_at DESC"),settings=s)
 @app.get("/api/buffer-queue")
 def buffer_queue():
  s=rows("SELECT * FROM settings WHERE id=1")[0]
@@ -88,23 +113,34 @@ def buffer_queue():
 @app.post("/api/library")
 def add_library():
  if request.content_type and "multipart" in request.content_type:
-  f=request.files.get("file");ident=str(uuid.uuid4());name=None
-  if f and f.filename:name=Path(f.filename).name;f.save(UPLOADS/f"{ident}-{name}")
-  record=(ident,request.form.get("category","Information"),request.form.get("title","").strip(),request.form.get("details",""),web_url(request.form.get("url")),name,datetime.now(timezone.utc).isoformat(),web_url(request.form.get("image_url")),request.form.get("event_date",""),request.form.get("start_time",""),request.form.get("end_time",""),request.form.get("location",""),request.form.get("recurrence","one_time"),json.dumps(request.form.getlist("recurrence_day")),request.form.get("recurrence_end",""))
+  ident=str(uuid.uuid4());record=(ident,request.form.get("category","Information"),request.form.get("title","").strip(),request.form.get("details",""),web_url(request.form.get("url")),None,datetime.now(timezone.utc).isoformat(),"",request.form.get("event_date",""),request.form.get("start_time",""),request.form.get("end_time",""),request.form.get("location",""),request.form.get("recurrence","one_time"),json.dumps(request.form.getlist("recurrence_day")),request.form.get("recurrence_end",""))
   if not record[2]:return jsonify(error="Title is required"),400
  else:
   x=request.get_json(force=True);record=(str(uuid.uuid4()),x.get("category","Information"),x.get("title","" ).strip(),x.get("details",""),x.get("url",""),None,datetime.now(timezone.utc).isoformat(),x.get("image_url",""),x.get("event_date",""),x.get("start_time",""),x.get("end_time",""),x.get("location",""),x.get("recurrence","one_time"),json.dumps(x.get("recurrence_days",[])),x.get("recurrence_end",""))
   if not record[2]:return jsonify(error="Title is required"),400
- c=db();c.execute("INSERT INTO library(id,category,title,details,url,filename,created_at,image_url,event_date,start_time,end_time,location,recurrence,recurrence_days,recurrence_end) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",record);c.commit();c.close();return jsonify(ok=True)
+ c=db();c.execute("INSERT INTO library(id,category,title,details,url,filename,created_at,image_url,event_date,start_time,end_time,location,recurrence,recurrence_days,recurrence_end) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",record)
+ if request.content_type and "multipart" in request.content_type:add_media(c,record[0],request.files.getlist("files") or request.files.getlist("file"),request.form.get("image_urls",request.form.get("image_url","")).splitlines())
+ c.commit();c.close();return jsonify(ok=True)
 @app.put("/api/library/<ident>")
 def edit_library(ident):
- x=request.form;f=request.files.get("file");c=db();old=c.execute("SELECT * FROM library WHERE id=?",(ident,)).fetchone()
+ x=request.form;c=db();old=c.execute("SELECT * FROM library WHERE id=?",(ident,)).fetchone()
  if not old:return jsonify(error="Information not found"),404
  name=old["filename"]
- if f and f.filename:name=Path(f.filename).name;f.save(UPLOADS/f"{ident}-{name}")
  title=x.get("title","").strip()
  if not title:return jsonify(error="Title is required"),400
- c.execute("UPDATE library SET category=?,title=?,details=?,url=?,filename=?,image_url=?,event_date=?,start_time=?,end_time=?,location=?,recurrence=?,recurrence_days=?,recurrence_end=? WHERE id=?",(x.get("category","Information"),title,x.get("details",""),web_url(x.get("url")),name,web_url(x.get("image_url")),x.get("event_date",""),x.get("start_time",""),x.get("end_time",""),x.get("location",""),x.get("recurrence","one_time"),json.dumps(x.getlist("recurrence_day")),x.get("recurrence_end",""),ident));c.commit();c.close();return jsonify(ok=True)
+ c.execute("UPDATE library SET category=?,title=?,details=?,url=?,filename=?,image_url=?,event_date=?,start_time=?,end_time=?,location=?,recurrence=?,recurrence_days=?,recurrence_end=? WHERE id=?",(x.get("category","Information"),title,x.get("details",""),web_url(x.get("url")),name,old["image_url"],x.get("event_date",""),x.get("start_time",""),x.get("end_time",""),x.get("location",""),x.get("recurrence","one_time"),json.dumps(x.getlist("recurrence_day")),x.get("recurrence_end",""),ident));add_media(c,ident,request.files.getlist("files") or request.files.getlist("file"),x.get("image_urls","").splitlines());c.commit();c.close();return jsonify(ok=True)
+@app.delete("/api/library/<library_id>/media/<media_id>")
+def del_library_media(library_id,media_id):
+ c=db();item=c.execute("SELECT * FROM library_media WHERE id=? AND library_id=?",(media_id,library_id)).fetchone()
+ if not item and media_id in ("legacy-url","legacy-upload"):
+  old=c.execute("SELECT filename FROM library WHERE id=?",(library_id,)).fetchone()
+  if not old:c.close();return jsonify(error="Image not found"),404
+  if media_id=="legacy-upload" and old["filename"]:(UPLOADS/f"{library_id}-{old['filename']}").unlink(missing_ok=True)
+  c.execute("UPDATE library SET image_url='' WHERE id=?",(library_id,)) if media_id=="legacy-url" else c.execute("UPDATE library SET filename=NULL WHERE id=?",(library_id,));c.commit();c.close();return jsonify(ok=True)
+ if not item:c.close();return jsonify(error="Image not found"),404
+ c.execute("DELETE FROM library_media WHERE id=?",(media_id,));c.commit();c.close()
+ if item["kind"]=="upload":(UPLOADS/f"{media_id}-{item['filename']}").unlink(missing_ok=True)
+ return jsonify(ok=True)
 @app.delete("/api/library/<ident>")
 def del_library(ident): c=db();r=c.execute("SELECT filename FROM library WHERE id=?",(ident,)).fetchone();c.execute("DELETE FROM library WHERE id=?",(ident,));c.commit();c.close();return jsonify(ok=True)
 @app.post("/api/tones")
@@ -136,8 +172,8 @@ def generate():
  if facebook_type not in ("post","story"):return jsonify(error="Facebook type must be Post or Story"),400
  if not platforms:return jsonify(error="Choose Facebook, Instagram, or both"),400
  if schedule_mode not in ("queue","custom"):return jsonify(error="Invalid scheduling choice"),400
- lib=rows(f"SELECT id,category,title,details,url,filename,image_url,event_date,start_time,end_time,location,recurrence,recurrence_days,recurrence_end FROM library WHERE id IN ({','.join('?'*len(selected))})",selected) if selected else []
- order={ident:i for i,ident in enumerate(selected)};lib.sort(key=lambda item:order.get(item["id"],9999));custom=(x.get("subject") or "").strip();topics=[{"subject":item["title"],"information":[item],"media_id":item["id"] if item.get("filename") or item.get("image_url") else ""} for item in lib]
+ lib=enrich_library(rows(f"SELECT id,category,title,details,url,filename,image_url,event_date,start_time,end_time,location,recurrence,recurrence_days,recurrence_end FROM library WHERE id IN ({','.join('?'*len(selected))})",selected)) if selected else []
+ order={ident:i for i,ident in enumerate(selected)};lib.sort(key=lambda item:order.get(item["id"],9999));custom=(x.get("subject") or "").strip();topics=[{"subject":item["title"],"information":[item],"media_id":item["id"] if item.get("media") else ""} for item in lib]
  fallback=x.get("media_id","")
  if custom:topics.append({"subject":custom,"information":[],"media_id":fallback})
  if not topics:return jsonify(error="Add at least one saved item or custom topic to the queue"),400
@@ -196,25 +232,25 @@ def approve(ident):
  platforms=json.loads(d["platforms"] or '["facebook"]');channels={"facebook":s["facebook_channel"] or s["buffer_channel"],"instagram":s["instagram_channel"]}
  missing=[p for p in platforms if not channels.get(p)]
  if missing:return jsonify(error="Configure Buffer channel ID for "+", ".join(missing)+" in Settings"),400
- media_url=""
+ media_urls=[]
  if d["media_id"]:
-  item=c.execute("SELECT filename,image_url FROM library WHERE id=?",(d["media_id"],)).fetchone()
-  if item and item["image_url"]:media_url=item["image_url"]
-  elif item and item["filename"]:
-   if not s["public_url"]:return jsonify(error="This post uses an uploaded image. Set the Public HTTPS address in Settings so Buffer can retrieve it, or save a direct public image URL with the Information item."),400
-   media_url=s["public_url"].rstrip("/")+"/media/"+d["media_id"]
- if "instagram" in platforms and not media_url:return jsonify(error="Instagram requires an image"),400
+  for item in media_for(d["media_id"],c):
+   if item["kind"]=="url":media_urls.append(item["value"])
+   elif item["kind"]=="legacy":
+    if not s["public_url"]:return jsonify(error="This post uses uploaded images. Set the Public HTTPS address in Settings so Buffer can retrieve them."),400
+    media_urls.append(s["public_url"].rstrip("/")+"/media/"+d["media_id"])
+   else:
+    if not s["public_url"]:return jsonify(error="This post uses uploaded images. Set the Public HTTPS address in Settings so Buffer can retrieve them."),400
+    media_urls.append(s["public_url"].rstrip("/")+"/media-file/"+item["id"])
+ if "instagram" in platforms and not media_urls:return jsonify(error="Instagram requires an image"),400
  query="""mutation CreatePost($text:String!,$channel:ChannelId!,$due:DateTime,$mode:ShareMode!,$assets:[AssetInput!]!,$metadata:PostInputMetaData){createPost(input:{text:$text,channelId:$channel,schedulingType:automatic,mode:$mode,dueAt:$due,assets:$assets,metadata:$metadata}){... on PostActionSuccess{post{id text dueAt}} ... on MutationError{message}}}"""
  post_ids=[]
  for platform in platforms:
   metadata={"instagram":{"type":d["instagram_type"] or "post","shouldShareToFeed":True}} if platform=="instagram" else {"facebook":{"type":d["facebook_type"] or "post"}}
-  variables={"text":d["caption"],"channel":channels[platform],"due":d["scheduled_at"] if d["schedule_mode"]=="custom" else None,"mode":"customScheduled" if d["schedule_mode"]=="custom" else "addToQueue","assets":[{"image":{"url":media_url}}] if media_url else [],"metadata":metadata}
-  try:r=requests.post("https://api.buffer.com",headers={"Authorization":"Bearer "+s["buffer_token"]},json={"query":query,"variables":variables},timeout=60)
-  except requests.RequestException as e:return jsonify(error=f"Could not reach Buffer: {e}"),502
+  variables={"text":d["caption"],"channel":channels[platform],"due":d["scheduled_at"] if d["schedule_mode"]=="custom" else None,"mode":"customScheduled" if d["schedule_mode"]=="custom" else "addToQueue","assets":[{"image":{"url":url}} for url in media_urls],"metadata":metadata}
   try:
-   result=r.json();data=result.get("data") or {};post=data.get("createPost") or {};errors=result.get("errors") or [];error=post.get("message") or (errors[0].get("message") if errors else None)
-  except (ValueError,AttributeError,IndexError):return jsonify(error=f"Buffer returned {r.status_code}: {r.text[:300]}"),502
-  if not r.ok and not error:error=f"Buffer returned HTTP {r.status_code}"
+   data=buffer_call(s["buffer_token"],query,variables);post=data.get("createPost") or {};error=post.get("message")
+  except (requests.RequestException,ValueError,AttributeError,IndexError) as e:return jsonify(error=f"Could not reach Buffer: {e}"),502
   if error:return jsonify(error=f"{platform.title()}: {error}"),502
   post_ids.append(post.get("post",{}).get("id"))
  c.execute("UPDATE drafts SET status='approved',buffer_id=? WHERE id=?",(json.dumps(post_ids),ident));c.commit();c.close();return jsonify(ok=True)
