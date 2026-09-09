@@ -8,7 +8,7 @@ const metricValue=(summary,key)=>summary.totals[key]??null;
 async function loadInsights(){
  const status=$('#insights-status'),button=$('#refresh-insights');button.disabled=true;status.textContent='Loading Buffer metrics…';
  try{
-  const response=await fetch(`/api/buffer-insights?days=${$('#insights-days').value}`),data=await response.json();
+  const response=await fetch(`/api/buffer-insights?days=${$('#insights-days').value}&platform=${$('#insights-platform').value}`),data=await response.json();
   if(!response.ok)throw Error(data.error||`Server ${response.status}`);
   render(data);
   const freshness=data.updatedAt?`Updated ${new Date(data.updatedAt).toLocaleString()}`:`${data.channels} connected channel${data.channels===1?'':'s'} · No metrics in this period`;
@@ -38,7 +38,7 @@ function renderStories(data){
  const platforms=Object.entries(data.platforms).sort((a,b)=>b[1].derived.engagements-a[1].derived.engagements),leader=platforms[0],total=current.derived.engagements||0;
  const stories=[];
  if(growth)stories.push(`<div class="story-card"><span class="story-icon">↑</span><span><b>${escapeHtml(meta[growth.key].name)} is gaining momentum</b><small>Up ${growth.change.toFixed(1)}% compared with the previous period.</small></span></div>`);
- if(leader&&total)stories.push(`<div class="story-card secondary"><span class="story-icon">◎</span><span><b>${escapeHtml(leader[0])} drove the most engagement</b><small>${(leader[1].derived.engagements/total*100).toFixed(0)}% of total calculated engagements came from this channel.</small></span></div>`);
+ if(platforms.length>1&&leader&&total)stories.push(`<div class="story-card secondary"><span class="story-icon">◎</span><span><b>${escapeHtml(leader[0])} drove the most engagement</b><small>${(leader[1].derived.engagements/total*100).toFixed(0)}% of total calculated engagements came from this channel.</small></span></div>`);
  $('#insights-story').innerHTML=stories.join('');
 }
 
@@ -60,8 +60,9 @@ function renderMetrics(current,prior){
 }
 
 function renderPosts(posts){
- $('#insights-posts').innerHTML=posts.map((post,index)=>`<article class="insight-post"><div class="rank">${String(index+1).padStart(2,'0')}</div><div><b>${escapeHtml(post.platform)}</b><p>${escapeHtml((post.text||'(No caption)').slice(0,260))}</p><small>${post.dueAt?new Date(post.dueAt).toLocaleString():''}${post.externalLink?` · <a href="${escapeHtml(post.externalLink)}" target="_blank" rel="noopener">View post</a>`:''}</small></div><div class="post-score"><b>${format(post.derivedEngagements)} engagements</b><small>${post.derivedEngagementRate==null?'Rate unavailable':`${format(post.derivedEngagementRate,'percentage')} calculated rate`}</small></div></article>`).join('')||'<div class="empty-insights">Buffer supplied aggregate analytics, but no individual posts are available for ranking.</div>';
+ const card=$('#insights-post-card');card.hidden=!posts.length;
+ $('#insights-posts').innerHTML=posts.map((post,index)=>`<article class="insight-post"><div class="rank">${String(index+1).padStart(2,'0')}</div><div><b>${escapeHtml(post.platform)}</b><p>${escapeHtml((post.text||'(No caption)').slice(0,260))}</p><small>${post.dueAt?new Date(post.dueAt).toLocaleString():''}${post.externalLink?` · <a href="${escapeHtml(post.externalLink)}" target="_blank" rel="noopener">View post</a>`:''}</small></div><div class="post-score"><b>${format(post.derivedEngagements)} engagements</b><small>${post.derivedEngagementRate==null?'Rate unavailable':`${format(post.derivedEngagementRate,'percentage')} calculated rate`}</small></div></article>`).join('');
 }
 
-$('#refresh-insights').onclick=loadInsights;$('#insights-days').onchange=loadInsights;$('button[data-tab="insights"]').addEventListener('click',loadInsights);
+$('#refresh-insights').onclick=loadInsights;$('#insights-days').onchange=loadInsights;$('#insights-platform').onchange=loadInsights;$('button[data-tab="insights"]').addEventListener('click',loadInsights);
 })();

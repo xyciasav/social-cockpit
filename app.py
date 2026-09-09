@@ -7,7 +7,7 @@ from urllib.parse import urlsplit, urlunsplit
 from comfyui_client import ComfyUIClient, ComfyUIError
 from asset_processing import isolate_background, vectorize_png
 
-VERSION="1.14.0"; ROOT=Path(__file__).parent; DATA=Path(os.getenv("DATA_DIR",ROOT/"data")); UPLOADS=DATA/"uploads"; ASSETS=DATA/"generated-assets"; DB=DATA/"social-cockpit.db"
+VERSION="1.14.1"; ROOT=Path(__file__).parent; DATA=Path(os.getenv("DATA_DIR",ROOT/"data")); UPLOADS=DATA/"uploads"; ASSETS=DATA/"generated-assets"; DB=DATA/"social-cockpit.db"
 DATA.mkdir(exist_ok=True);UPLOADS.mkdir(exist_ok=True);ASSETS.mkdir(exist_ok=True)
 app=Flask(__name__);app.config["MAX_CONTENT_LENGTH"]=25*1024*1024
 def db(): c=sqlite3.connect(DB);c.row_factory=sqlite3.Row;return c
@@ -169,6 +169,8 @@ def buffer_insights():
  if not s["buffer_token"]:return jsonify(error="Configure the Buffer API key in Settings"),400
  try:days=max(1,min(365,int(request.args.get("days",30))))
  except ValueError:return jsonify(error="Days must be a number from 1 to 365"),400
+ platform_filter=request.args.get("platform","all").lower()
+ if platform_filter not in ("all","facebook","instagram"):return jsonify(error="Platform must be all, facebook, or instagram"),400
  end=datetime.now(timezone.utc);start=end.replace(microsecond=0)-timedelta(days=days);previous_start=start-timedelta(days=days)
  try:
   account=buffer_call(s["buffer_token"],"query { account { organizations { id name } } }");organizations=(account.get("account") or {}).get("organizations") or []
@@ -180,7 +182,7 @@ def buffer_insights():
     owned={"Facebook":[],"Instagram":[]}
     for channel in channel_data.get("channels") or []:
      service=str(channel.get("service") or "").lower()
-     if service not in ("facebook","instagram"):continue
+     if service not in ("facebook","instagram") or (platform_filter!="all" and service!=platform_filter):continue
      platform="Facebook" if service=="facebook" else "Instagram";owned[platform].append(channel["id"]);channels[channel["id"]]=platform
     for platform,ids in owned.items():
      if not ids:continue
@@ -203,7 +205,7 @@ def buffer_insights():
   current["posts"]=summarize_insights(all_posts,start,end)["posts"][:50]
   aggregate_groups=[group for values in current_aggregates.values() for group in values]
   updated_at=max([p.get("metricsUpdatedAt") or "" for p in all_posts]+[group.get("metricsUpdatedAt") or "" for group in aggregate_groups],default="") or None
-  return jsonify(days=days,start=start.isoformat(),end=end.isoformat(),updatedAt=updated_at,current=current,previous=previous,platforms=platforms,channels=len(channels),warnings=query_errors,experimental=True)
+  return jsonify(days=days,platform=platform_filter,start=start.isoformat(),end=end.isoformat(),updatedAt=updated_at,current=current,previous=previous,platforms=platforms,channels=len(channels),warnings=query_errors,experimental=True)
  except (requests.RequestException,ValueError,KeyError) as e:return jsonify(error=f"Could not load Buffer insights: {e}"),502
 @app.post("/api/library")
 def add_library():
