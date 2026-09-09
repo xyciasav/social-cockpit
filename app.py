@@ -7,7 +7,7 @@ from urllib.parse import urlsplit, urlunsplit
 from comfyui_client import ComfyUIClient, ComfyUIError
 from asset_processing import isolate_background, vectorize_png
 
-VERSION="1.13.0"; ROOT=Path(__file__).parent; DATA=Path(os.getenv("DATA_DIR",ROOT/"data")); UPLOADS=DATA/"uploads"; ASSETS=DATA/"generated-assets"; DB=DATA/"social-cockpit.db"
+VERSION="1.13.1"; ROOT=Path(__file__).parent; DATA=Path(os.getenv("DATA_DIR",ROOT/"data")); UPLOADS=DATA/"uploads"; ASSETS=DATA/"generated-assets"; DB=DATA/"social-cockpit.db"
 DATA.mkdir(exist_ok=True);UPLOADS.mkdir(exist_ok=True);ASSETS.mkdir(exist_ok=True)
 app=Flask(__name__);app.config["MAX_CONTENT_LENGTH"]=25*1024*1024
 def db(): c=sqlite3.connect(DB);c.row_factory=sqlite3.Row;return c
@@ -149,22 +149,33 @@ def buffer_queue():
 def buffer_insights():
  s=rows("SELECT * FROM settings WHERE id=1")[0]
  if not s["buffer_token"]:return jsonify(error="Configure the Buffer API key in Settings"),400
- channels={s["facebook_channel"] or s["buffer_channel"]:"Facebook",s["instagram_channel"]:"Instagram"};channels={k:v for k,v in channels.items() if k}
- if not channels:return jsonify(error="Configure a Facebook or Instagram channel ID in Settings"),400
  try:days=max(1,min(365,int(request.args.get("days",30))))
  except ValueError:return jsonify(error="Days must be a number from 1 to 365"),400
  end=datetime.now(timezone.utc);start=end.replace(microsecond=0)-timedelta(days=days);previous_start=start-timedelta(days=days)
  try:
-  account=buffer_call(s["buffer_token"],"query { account { organizations { id name } } }");organizations=(account.get("account") or {}).get("organizations") or [];all_posts=[]
+  account=buffer_call(s["buffer_token"],"query { account { organizations { id name } } }");organizations=(account.get("account") or {}).get("organizations") or []
+  if not organizations:return jsonify(error="Buffer returned no organizations for this API key"),502
+  all_posts=[];channels={};query_errors=[]
   for organization in organizations:
-   try:all_posts.extend(fetch_buffer_metric_posts(s["buffer_token"],organization["id"],list(channels),previous_start))
-   except ValueError:continue
+   try:
+    channel_data=buffer_call(s["buffer_token"],"query Channels($organization:OrganizationId!){channels(input:{organizationId:$organization}){id name displayName service}}",{"organization":organization["id"]})
+    owned=[]
+    for channel in channel_data.get("channels") or []:
+     service=str(channel.get("service") or "").lower()
+     if service not in ("facebook","instagram"):continue
+     owned.append(channel["id"]);channels[channel["id"]]="Facebook" if service=="facebook" else "Instagram"
+    if owned:all_posts.extend(fetch_buffer_metric_posts(s["buffer_token"],organization["id"],owned,previous_start))
+   except ValueError as e:query_errors.append(f"{organization.get('name') or organization['id']}: {e}")
+  if not channels:
+   detail="; ".join(query_errors) if query_errors else "No connected Facebook or Instagram channels were found"
+   return jsonify(error=detail),502
+  if query_errors and not all_posts:return jsonify(error="Buffer could not load post metrics: "+"; ".join(query_errors)),502
   all_posts=list({post["id"]:post for post in all_posts}.values())
   for post in all_posts:post["platform"]=channels.get(post.get("channelId"),"Buffer")
   current=summarize_insights(all_posts,start,end);previous=summarize_insights(all_posts,previous_start,start)
-  platforms={name:summarize_insights([p for p in all_posts if p.get("platform")==name],start,end) for name in channels.values()}
+  platforms={name:summarize_insights([p for p in all_posts if p.get("platform")==name],start,end) for name in sorted(set(channels.values()))}
   current["posts"]=current["posts"][:50]
-  return jsonify(days=days,start=start.isoformat(),end=end.isoformat(),updatedAt=max((p.get("metricsUpdatedAt") or "" for p in all_posts),default="") or None,current=current,previous=previous,platforms=platforms,experimental=True)
+  return jsonify(days=days,start=start.isoformat(),end=end.isoformat(),updatedAt=max((p.get("metricsUpdatedAt") or "" for p in all_posts),default="") or None,current=current,previous=previous,platforms=platforms,channels=len(channels),warnings=query_errors,experimental=True)
  except (requests.RequestException,ValueError,KeyError) as e:return jsonify(error=f"Could not load Buffer insights: {e}"),502
 @app.post("/api/library")
 def add_library():
