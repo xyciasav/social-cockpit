@@ -7,7 +7,7 @@ from urllib.parse import urlsplit, urlunsplit
 from comfyui_client import ComfyUIClient, ComfyUIError
 from asset_processing import isolate_background, vectorize_png
 
-VERSION="1.13.1"; ROOT=Path(__file__).parent; DATA=Path(os.getenv("DATA_DIR",ROOT/"data")); UPLOADS=DATA/"uploads"; ASSETS=DATA/"generated-assets"; DB=DATA/"social-cockpit.db"
+VERSION="1.13.2"; ROOT=Path(__file__).parent; DATA=Path(os.getenv("DATA_DIR",ROOT/"data")); UPLOADS=DATA/"uploads"; ASSETS=DATA/"generated-assets"; DB=DATA/"social-cockpit.db"
 DATA.mkdir(exist_ok=True);UPLOADS.mkdir(exist_ok=True);ASSETS.mkdir(exist_ok=True)
 app=Flask(__name__);app.config["MAX_CONTENT_LENGTH"]=25*1024*1024
 def db(): c=sqlite3.connect(DB);c.row_factory=sqlite3.Row;return c
@@ -112,6 +112,24 @@ def fetch_buffer_metric_posts(token,organization_id,channel_ids,start_date,max_p
   if not page.get("hasNextPage"):break
   cursor=page.get("endCursor")
  return posts
+def fetch_buffer_aggregate(token,organization_id,channel_ids,start,end):
+ query="""query Aggregate($organization:OrganizationId!,$channels:[ChannelId!]!,$start:DateTime!,$end:DateTime!){aggregatedPostMetrics(input:{organizationId:$organization,channelIds:$channels,startDateTime:$start,endDateTime:$end}){metrics{type name value unit}metricsUpdatedAt}}"""
+ return buffer_call(token,query,{"organization":organization_id,"channels":channel_ids,"start":start.isoformat(),"end":end.isoformat()}).get("aggregatedPostMetrics") or {}
+def summarize_aggregates(groups,start,end):
+ totals={};metric_meta={};percentage_values={};post_count=0
+ for group in groups:
+  metrics=group.get("metrics") or [];group_count=next((float(m.get("value") or 0) for m in metrics if metric_key(m.get("type"))=="postcount"),0)
+  post_count+=group_count
+  for metric in metrics:
+   key=metric_key(metric.get("type") or metric.get("name"));value=float(metric.get("value") or 0);unit=metric.get("unit") or "count"
+   metric_meta[key]={"type":metric.get("type") or key,"name":metric.get("name") or metric.get("type") or key,"unit":unit}
+   if unit=="percentage":percentage_values.setdefault(key,[]).append((value,group_count))
+   else:totals[key]=totals.get(key,0)+value
+ for key,values in percentage_values.items():
+  weight=sum(weight for _,weight in values);totals[key]=sum(value*weight for value,weight in values)/weight if weight else 0
+ engagement_keys=("comments","shares","saves","clicks","linkclicks");engagements=(totals.get("reactions",totals.get("likes",0))+sum(totals.get(key,0) for key in engagement_keys))
+ denominator=totals.get("reach") or totals.get("impressions") or 0
+ return {"postCount":int(post_count),"totals":totals,"metricMeta":metric_meta,"derived":{"engagements":engagements,"engagementRate":engagements/denominator*100 if denominator else None,"averageEngagements":engagements/post_count if post_count else 0,"postsPerWeek":post_count/max((end-start).total_seconds()/604800,1/7)},"posts":[]}
 @app.get("/")
 def home(): return render_template("index.html",version=VERSION)
 @app.get("/media/<ident>")
@@ -155,27 +173,37 @@ def buffer_insights():
  try:
   account=buffer_call(s["buffer_token"],"query { account { organizations { id name } } }");organizations=(account.get("account") or {}).get("organizations") or []
   if not organizations:return jsonify(error="Buffer returned no organizations for this API key"),502
-  all_posts=[];channels={};query_errors=[]
+  all_posts=[];channels={};query_errors=[];current_aggregates={"Facebook":[],"Instagram":[]};previous_aggregates={"Facebook":[],"Instagram":[]};aggregate_successes=0
   for organization in organizations:
    try:
     channel_data=buffer_call(s["buffer_token"],"query Channels($organization:OrganizationId!){channels(input:{organizationId:$organization}){id name displayName service}}",{"organization":organization["id"]})
-    owned=[]
+    owned={"Facebook":[],"Instagram":[]}
     for channel in channel_data.get("channels") or []:
      service=str(channel.get("service") or "").lower()
      if service not in ("facebook","instagram"):continue
-     owned.append(channel["id"]);channels[channel["id"]]="Facebook" if service=="facebook" else "Instagram"
-    if owned:all_posts.extend(fetch_buffer_metric_posts(s["buffer_token"],organization["id"],owned,previous_start))
+     platform="Facebook" if service=="facebook" else "Instagram";owned[platform].append(channel["id"]);channels[channel["id"]]=platform
+    for platform,ids in owned.items():
+     if not ids:continue
+     try:
+      current_aggregates[platform].append(fetch_buffer_aggregate(s["buffer_token"],organization["id"],ids,start,end));previous_aggregates[platform].append(fetch_buffer_aggregate(s["buffer_token"],organization["id"],ids,previous_start,start));aggregate_successes+=1
+     except ValueError as e:query_errors.append(f"{organization.get('name') or organization['id']} {platform} metrics: {e}")
+    channel_ids=[ident for ids in owned.values() for ident in ids]
+    if channel_ids:
+     try:all_posts.extend(fetch_buffer_metric_posts(s["buffer_token"],organization["id"],channel_ids,previous_start))
+     except ValueError as e:query_errors.append(f"{organization.get('name') or organization['id']} top posts: {e}")
    except ValueError as e:query_errors.append(f"{organization.get('name') or organization['id']}: {e}")
   if not channels:
    detail="; ".join(query_errors) if query_errors else "No connected Facebook or Instagram channels were found"
    return jsonify(error=detail),502
-  if query_errors and not all_posts:return jsonify(error="Buffer could not load post metrics: "+"; ".join(query_errors)),502
+  if query_errors and not aggregate_successes:return jsonify(error="Buffer could not load post metrics: "+"; ".join(query_errors)),502
   all_posts=list({post["id"]:post for post in all_posts}.values())
   for post in all_posts:post["platform"]=channels.get(post.get("channelId"),"Buffer")
-  current=summarize_insights(all_posts,start,end);previous=summarize_insights(all_posts,previous_start,start)
-  platforms={name:summarize_insights([p for p in all_posts if p.get("platform")==name],start,end) for name in sorted(set(channels.values()))}
-  current["posts"]=current["posts"][:50]
-  return jsonify(days=days,start=start.isoformat(),end=end.isoformat(),updatedAt=max((p.get("metricsUpdatedAt") or "" for p in all_posts),default="") or None,current=current,previous=previous,platforms=platforms,channels=len(channels),warnings=query_errors,experimental=True)
+  platforms={name:summarize_aggregates(current_aggregates[name],start,end) for name in sorted(set(channels.values()))}
+  current=summarize_aggregates([group for values in current_aggregates.values() for group in values],start,end);previous=summarize_aggregates([group for values in previous_aggregates.values() for group in values],previous_start,start)
+  current["posts"]=summarize_insights(all_posts,start,end)["posts"][:50]
+  aggregate_groups=[group for values in current_aggregates.values() for group in values]
+  updated_at=max([p.get("metricsUpdatedAt") or "" for p in all_posts]+[group.get("metricsUpdatedAt") or "" for group in aggregate_groups],default="") or None
+  return jsonify(days=days,start=start.isoformat(),end=end.isoformat(),updatedAt=updated_at,current=current,previous=previous,platforms=platforms,channels=len(channels),warnings=query_errors,experimental=True)
  except (requests.RequestException,ValueError,KeyError) as e:return jsonify(error=f"Could not load Buffer insights: {e}"),502
 @app.post("/api/library")
 def add_library():

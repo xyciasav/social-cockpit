@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 
-from app import summarize_insights
+from app import summarize_aggregates, summarize_insights
 
 
 def test_summarizes_dynamic_buffer_metrics_and_calculates_engagement():
@@ -34,3 +34,16 @@ def test_summarizes_dynamic_buffer_metrics_and_calculates_engagement():
 def test_excludes_posts_outside_period():
     result = summarize_insights([{"id": "old", "dueAt": "2025-01-01T00:00:00Z", "metrics": []}], datetime(2026, 9, 1, tzinfo=timezone.utc), datetime(2026, 10, 1, tzinfo=timezone.utc))
     assert result["postCount"] == 0
+
+
+def test_combines_buffer_aggregate_metrics_and_weights_percentages():
+    groups = [
+        {"metrics": [{"type": "postCount", "name": "Posts", "value": 2, "unit": "count"}, {"type": "reactions", "name": "Reactions", "value": 20, "unit": "count"}, {"type": "comments", "name": "Comments", "value": 4, "unit": "count"}, {"type": "reach", "name": "Reach", "value": 200, "unit": "count"}, {"type": "engagementRate", "name": "Eng. Rate", "value": 12, "unit": "percentage"}]},
+        {"metrics": [{"type": "postCount", "name": "Posts", "value": 1, "unit": "count"}, {"type": "reactions", "name": "Reactions", "value": 5, "unit": "count"}, {"type": "comments", "name": "Comments", "value": 1, "unit": "count"}, {"type": "reach", "name": "Reach", "value": 100, "unit": "count"}, {"type": "engagementRate", "name": "Eng. Rate", "value": 6, "unit": "percentage"}]},
+    ]
+    result = summarize_aggregates(groups, datetime(2026, 9, 1, tzinfo=timezone.utc), datetime(2026, 10, 1, tzinfo=timezone.utc))
+    assert result["postCount"] == 3
+    assert result["totals"]["reactions"] == 25
+    assert result["totals"]["engagementrate"] == 10
+    assert result["derived"]["engagements"] == 30
+    assert result["derived"]["engagementRate"] == 10
