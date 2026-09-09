@@ -1,5 +1,5 @@
 import json, os, random, sqlite3, threading, uuid
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from flask import Flask, jsonify, render_template, request, send_file
 import requests
@@ -7,7 +7,7 @@ from urllib.parse import urlsplit, urlunsplit
 from comfyui_client import ComfyUIClient, ComfyUIError
 from asset_processing import isolate_background, vectorize_png
 
-VERSION="1.12.0"; ROOT=Path(__file__).parent; DATA=Path(os.getenv("DATA_DIR",ROOT/"data")); UPLOADS=DATA/"uploads"; ASSETS=DATA/"generated-assets"; DB=DATA/"social-cockpit.db"
+VERSION="1.13.0"; ROOT=Path(__file__).parent; DATA=Path(os.getenv("DATA_DIR",ROOT/"data")); UPLOADS=DATA/"uploads"; ASSETS=DATA/"generated-assets"; DB=DATA/"social-cockpit.db"
 DATA.mkdir(exist_ok=True);UPLOADS.mkdir(exist_ok=True);ASSETS.mkdir(exist_ok=True)
 app=Flask(__name__);app.config["MAX_CONTENT_LENGTH"]=25*1024*1024
 def db(): c=sqlite3.connect(DB);c.row_factory=sqlite3.Row;return c
@@ -77,6 +77,41 @@ def buffer_call(token,query,variables=None):
  if not r.ok:raise ValueError((result.get("errors") or [{}])[0].get("message",f"Buffer returned HTTP {r.status_code}"))
  if result.get("errors"):raise ValueError(result["errors"][0].get("message","Buffer query failed"))
  return result.get("data") or {}
+def metric_key(value): return "".join(ch.lower() for ch in (value or "") if ch.isalnum())
+def summarize_insights(posts,start,end):
+ selected=[];totals={};metric_meta={}
+ for post in posts:
+  try:published=datetime.fromisoformat((post.get("dueAt") or "").replace("Z","+00:00"))
+  except ValueError:continue
+  if not start <= published < end:continue
+  item={**post,"metricValues":{}}
+  for metric in post.get("metrics") or []:
+   key=metric_key(metric.get("type") or metric.get("name"));value=float(metric.get("value") or 0)
+   item["metricValues"][key]=value;totals[key]=totals.get(key,0)+value
+   metric_meta[key]={"type":metric.get("type") or key,"name":metric.get("name") or metric.get("type") or key,"unit":metric.get("unit") or "count"}
+  selected.append(item)
+ count=len(selected);engagement_keys=("reactions","likes","comments","shares","saves","clicks","linkclicks")
+ def first_metric(values,names):
+  for name in names:
+   if name in values:return values[name]
+  return 0
+ for item in selected:
+  values=item["metricValues"];item["derivedEngagements"]=first_metric(values,("reactions","likes"))+sum(values.get(k,0) for k in engagement_keys[2:])
+  denominator=first_metric(values,("reach","impressions"));item["derivedEngagementRate"]=(item["derivedEngagements"]/denominator*100) if denominator else None
+ selected.sort(key=lambda x:(x["derivedEngagementRate"] if x["derivedEngagementRate"] is not None else -1,x["derivedEngagements"]),reverse=True)
+ for key,meta in metric_meta.items():
+  if meta["unit"]=="percentage" and count:totals[key]=totals[key]/count
+ engagements=sum(x["derivedEngagements"] for x in selected);reach=first_metric(totals,("reach","impressions"))
+ return {"postCount":count,"totals":totals,"metricMeta":metric_meta,"derived":{"engagements":engagements,"engagementRate":engagements/reach*100 if reach else None,"averageEngagements":engagements/count if count else 0,"postsPerWeek":count/max((end-start).total_seconds()/604800,1/7)},"posts":selected}
+def fetch_buffer_metric_posts(token,organization_id,channel_ids,start_date,max_pages=10):
+ query="""query Insights($organization:OrganizationId!,$channels:[ChannelId!]!,$start:DateTime!,$after:String){posts(first:100,after:$after,input:{organizationId:$organization,sort:[{field:dueAt,direction:desc}],filter:{status:[sent],channelIds:$channels,startDate:$start}}){edges{node{id text dueAt channelId externalLink metrics{type name value unit} metricsUpdatedAt}}pageInfo{endCursor hasNextPage}}}"""
+ posts=[];cursor=None
+ for _ in range(max_pages):
+  data=buffer_call(token,query,{"organization":organization_id,"channels":channel_ids,"start":start_date.isoformat(),"after":cursor});connection=data.get("posts") or {}
+  posts.extend(edge["node"] for edge in connection.get("edges") or []);page=connection.get("pageInfo") or {}
+  if not page.get("hasNextPage"):break
+  cursor=page.get("endCursor")
+ return posts
 @app.get("/")
 def home(): return render_template("index.html",version=VERSION)
 @app.get("/media/<ident>")
@@ -110,6 +145,27 @@ def buffer_queue():
   for post in posts:seen[post["id"]]={**post,"platform":labels.get(post.get("channelId"),"Buffer")}
   return jsonify(posts=sorted(seen.values(),key=lambda post:post.get("dueAt") or ""))
  except (requests.RequestException,ValueError,KeyError) as e:return jsonify(error=f"Could not load Buffer queue: {e}"),502
+@app.get("/api/buffer-insights")
+def buffer_insights():
+ s=rows("SELECT * FROM settings WHERE id=1")[0]
+ if not s["buffer_token"]:return jsonify(error="Configure the Buffer API key in Settings"),400
+ channels={s["facebook_channel"] or s["buffer_channel"]:"Facebook",s["instagram_channel"]:"Instagram"};channels={k:v for k,v in channels.items() if k}
+ if not channels:return jsonify(error="Configure a Facebook or Instagram channel ID in Settings"),400
+ try:days=max(1,min(365,int(request.args.get("days",30))))
+ except ValueError:return jsonify(error="Days must be a number from 1 to 365"),400
+ end=datetime.now(timezone.utc);start=end.replace(microsecond=0)-timedelta(days=days);previous_start=start-timedelta(days=days)
+ try:
+  account=buffer_call(s["buffer_token"],"query { account { organizations { id name } } }");organizations=(account.get("account") or {}).get("organizations") or [];all_posts=[]
+  for organization in organizations:
+   try:all_posts.extend(fetch_buffer_metric_posts(s["buffer_token"],organization["id"],list(channels),previous_start))
+   except ValueError:continue
+  all_posts=list({post["id"]:post for post in all_posts}.values())
+  for post in all_posts:post["platform"]=channels.get(post.get("channelId"),"Buffer")
+  current=summarize_insights(all_posts,start,end);previous=summarize_insights(all_posts,previous_start,start)
+  platforms={name:summarize_insights([p for p in all_posts if p.get("platform")==name],start,end) for name in channels.values()}
+  current["posts"]=current["posts"][:50]
+  return jsonify(days=days,start=start.isoformat(),end=end.isoformat(),updatedAt=max((p.get("metricsUpdatedAt") or "" for p in all_posts),default="") or None,current=current,previous=previous,platforms=platforms,experimental=True)
+ except (requests.RequestException,ValueError,KeyError) as e:return jsonify(error=f"Could not load Buffer insights: {e}"),502
 @app.post("/api/library")
 def add_library():
  if request.content_type and "multipart" in request.content_type:

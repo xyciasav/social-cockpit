@@ -2,6 +2,8 @@
 
 Simple self-hosted post builder using Qwen through LM Studio and Buffer for approved scheduling.
 
+The Insights tab reads all per-post metrics returned by Buffer for the configured Facebook and Instagram channels. It also calculates total and average engagements, engagement rate, posting cadence, prior-period changes, platform comparisons, and top-post rankings. Buffer currently marks post metrics as experimental and refreshes them about once daily; a personal API key is required.
+
 ## Portainer
 
 Deploy a Git-backed stack using this repository, branch `main`, and `docker-compose.yaml`.
@@ -9,7 +11,7 @@ Deploy a Git-backed stack using this repository, branch `main`, and `docker-comp
 The stack pulls the explicitly versioned image:
 
 ```text
-ghcr.io/xyciasav/social-cockpit:1.12.0
+ghcr.io/xyciasav/social-cockpit:1.13.0
 ```
 
 Open `http://SERVER_IP:38427`, then configure LM Studio and Buffer under Settings.
