@@ -11,7 +11,7 @@ Deploy a Git-backed stack using this repository, branch `main`, and `docker-comp
 The stack pulls the explicitly versioned image:
 
 ```text
-ghcr.io/xyciasav/social-cockpit:1.13.2
+ghcr.io/xyciasav/social-cockpit:1.14.0
 ```
 
 Open `http://SERVER_IP:38427`, then configure LM Studio and Buffer under Settings.
