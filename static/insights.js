@@ -4,18 +4,19 @@ const escapeHtml=value=>String(value||'').replace(/[&<>"']/g,char=>({'&':'&amp;'
 const format=(value,unit)=>value==null?'—':unit==='percentage'?`${Number(value).toFixed(2)}%`:Intl.NumberFormat(undefined,{notation:Math.abs(value)>=10000?'compact':'standard',maximumFractionDigits:1}).format(value);
 const trend=(current,prior)=>{if(!prior)return{label:current?'New this period':'No change',className:'neutral',percent:null};let change=(current-prior)/Math.abs(prior)*100;return{label:`${change>=0?'↑':'↓'} ${Math.abs(change).toFixed(1)}%`,className:change>0?'up':change<0?'down':'neutral',percent:change}};
 const metricValue=(summary,key)=>summary.totals[key]??null;
+let savedTargets={},lastInsights=null;
 
 async function loadInsights(){
  const status=$('#insights-status'),button=$('#refresh-insights');button.disabled=true;status.textContent='Loading Buffer metrics…';
  try{
-  const response=await fetch(`/api/buffer-insights?days=${$('#insights-days').value}&platform=${$('#insights-platform').value}`),data=await response.json();
+  const [response,targetResponse]=await Promise.all([fetch(`/api/buffer-insights?days=${$('#insights-days').value}&platform=${$('#insights-platform').value}`),fetch('/api/insights-targets')]),data=await response.json(),targetData=await targetResponse.json();
   if(!response.ok)throw Error(data.error||`Server ${response.status}`);
-  render(data);
+  savedTargets=targetData.targets||{};lastInsights=data;render(data);
   const freshness=data.updatedAt?`Updated ${new Date(data.updatedAt).toLocaleString()}`:`${data.channels} connected channel${data.channels===1?'':'s'} · No metrics in this period`;
   status.textContent=data.warnings?.length?`${freshness} · Some details unavailable`:freshness;
  }catch(error){
   status.textContent=error.message;
-  ['#insights-story','#insights-summary','#insights-chart','#insights-platforms','#insights-metrics','#insights-posts'].forEach(selector=>$(selector).innerHTML='');
+  ['#insights-story','#insights-summary','#insights-goals','#insights-efficiency','#insights-chart','#insights-platforms','#insights-metrics','#insights-posts'].forEach(selector=>$(selector).innerHTML='');
  }finally{button.disabled=false}
 }
 
@@ -29,7 +30,19 @@ function render(data){
   {label:'Avg. engagements / post',value:current.derived.averageEngagements,prior:prior.derived.averageEngagements,source:'Social Cockpit calculation'}
  ];
  $('#insights-summary').innerHTML=cards.map(card=>{const change=trend(card.value||0,card.prior||0);return`<article class="metric-card${card.primary?' primary':''}"><span class="metric-label">${card.label}</span><b class="metric-value">${format(card.value,card.unit)}</b><span class="metric-change ${change.className}">${change.label} vs prior</span><small class="metric-source">${card.source}</small></article>`}).join('');
- renderStories(data);renderChart(current,prior);renderPlatforms(data.platforms,current);renderMetrics(current,prior);renderPosts(current.posts);
+ renderStories(data);renderGoals(data);renderEfficiency(current);renderChart(current,prior);renderPlatforms(data.platforms,current);renderMetrics(current,prior);renderPosts(current.posts);
+}
+
+function renderGoals(data){
+ const values={engagements:data.current.derived.engagements,reach:metricValue(data.current,'reach')||0,follows:metricValue(data.current,'follows')||0,clicks:metricValue(data.current,'clicks')||0,posts:data.current.postCount},labels={engagements:'Engagements',reach:'Reach',follows:'New follows',clicks:'Clicks',posts:'Posts'};
+ const active=Object.keys(labels).filter(key=>(savedTargets[key]||0)>0);
+ if(!active.length){$('#insights-goals').innerHTML='<div class="empty-goals"><b>Turn metrics into a plan.</b><span>Set 30-day targets to track progress and projected pace.</span></div>';return}
+ $('#insights-goals').innerHTML=active.map(key=>{const target=savedTargets[key],periodTarget=target*data.days/30,actual=values[key]||0,progress=periodTarget?actual/periodTarget*100:0,projection=actual/data.days*30;return`<div class="goal-row"><div class="goal-copy"><b>${labels[key]}</b><span>${format(actual)} of ${format(periodTarget)} period target</span></div><b class="goal-percent">${progress.toFixed(0)}%</b><div class="goal-track"><i style="width:${Math.min(progress,100)}%"></i></div><small>${progress>=100?'Target reached':`Projected 30-day result: ${format(projection)}`}</small></div>`}).join('');
+}
+
+function renderEfficiency(current){
+ const reach=metricValue(current,'reach')||metricValue(current,'impressions')||0,posts=current.postCount||0,items=[['Reach / post',posts?reach/posts:null],['Engagements / post',current.derived.averageEngagements],['Click rate',reach?(metricValue(current,'clicks')||0)/reach*100:null,'percentage'],['Share rate',reach?(metricValue(current,'shares')||0)/reach*100:null,'percentage'],['Follow conversion',reach?(metricValue(current,'follows')||0)/reach*100:null,'percentage']];
+ $('#insights-efficiency').innerHTML=items.map(([label,value,unit])=>`<div class="efficiency-stat"><small>${label}</small><b>${format(value,unit)}</b></div>`).join('');
 }
 
 function renderStories(data){
@@ -65,4 +78,7 @@ function renderPosts(posts){
 }
 
 $('#refresh-insights').onclick=loadInsights;$('#insights-days').onchange=loadInsights;$('#insights-platform').onchange=loadInsights;$('button[data-tab="insights"]').addEventListener('click',loadInsights);
+$('#edit-insights-targets').onclick=()=>{const form=$('#insights-target-form');Object.keys(savedTargets).forEach(key=>{if(form.elements[key])form.elements[key].value=savedTargets[key]||''});form.hidden=false;$('#insights-goals').hidden=true};
+$('#cancel-insights-targets').onclick=()=>{$('#insights-target-form').hidden=true;$('#insights-goals').hidden=false};
+$('#insights-target-form').onsubmit=async event=>{event.preventDefault();const form=event.currentTarget,button=form.querySelector('button');button.disabled=true;try{const response=await fetch('/api/insights-targets',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(Object.fromEntries(new FormData(form)))}),data=await response.json();if(!response.ok)throw Error(data.error||'Could not save targets');savedTargets=data.targets||{};form.hidden=true;$('#insights-goals').hidden=false;if(lastInsights)renderGoals(lastInsights)}catch(error){$('#insights-status').textContent=error.message}finally{button.disabled=false}};
 })();

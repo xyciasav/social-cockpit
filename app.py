@@ -7,7 +7,7 @@ from urllib.parse import urlsplit, urlunsplit
 from comfyui_client import ComfyUIClient, ComfyUIError
 from asset_processing import isolate_background, vectorize_png
 
-VERSION="1.14.1"; ROOT=Path(__file__).parent; DATA=Path(os.getenv("DATA_DIR",ROOT/"data")); UPLOADS=DATA/"uploads"; ASSETS=DATA/"generated-assets"; DB=DATA/"social-cockpit.db"
+VERSION="1.15.0"; ROOT=Path(__file__).parent; DATA=Path(os.getenv("DATA_DIR",ROOT/"data")); UPLOADS=DATA/"uploads"; ASSETS=DATA/"generated-assets"; DB=DATA/"social-cockpit.db"
 DATA.mkdir(exist_ok=True);UPLOADS.mkdir(exist_ok=True);ASSETS.mkdir(exist_ok=True)
 app=Flask(__name__);app.config["MAX_CONTENT_LENGTH"]=25*1024*1024
 def db(): c=sqlite3.connect(DB);c.row_factory=sqlite3.Row;return c
@@ -26,6 +26,7 @@ def init():
  for column in ("facebook_channel","instagram_channel","public_url"):
   if column not in settings_cols:c.execute(f"ALTER TABLE settings ADD COLUMN {column} TEXT DEFAULT ''")
  if "comfyui_url" not in settings_cols:c.execute("ALTER TABLE settings ADD COLUMN comfyui_url TEXT DEFAULT 'http://host.docker.internal:8188'")
+ if "insights_targets" not in settings_cols:c.execute("ALTER TABLE settings ADD COLUMN insights_targets TEXT DEFAULT '{}'")
  c.execute("UPDATE settings SET comfyui_url='http://host.docker.internal:8188' WHERE comfyui_url IS NULL OR comfyui_url='' ")
  draft_cols=[x[1] for x in c.execute("PRAGMA table_info(drafts)").fetchall()]
  if "platforms" not in draft_cols:c.execute("ALTER TABLE drafts ADD COLUMN platforms TEXT DEFAULT 'facebook'")
@@ -207,6 +208,20 @@ def buffer_insights():
   updated_at=max([p.get("metricsUpdatedAt") or "" for p in all_posts]+[group.get("metricsUpdatedAt") or "" for group in aggregate_groups],default="") or None
   return jsonify(days=days,platform=platform_filter,start=start.isoformat(),end=end.isoformat(),updatedAt=updated_at,current=current,previous=previous,platforms=platforms,channels=len(channels),warnings=query_errors,experimental=True)
  except (requests.RequestException,ValueError,KeyError) as e:return jsonify(error=f"Could not load Buffer insights: {e}"),502
+@app.route("/api/insights-targets",methods=["GET","PUT"])
+def insights_targets():
+ c=db();row=c.execute("SELECT insights_targets FROM settings WHERE id=1").fetchone()
+ if request.method=="GET":
+  c.close()
+  try:return jsonify(targets=json.loads((row["insights_targets"] if row else "") or "{}"))
+  except json.JSONDecodeError:return jsonify(targets={})
+ values=request.get_json(force=True) or {};allowed=("engagements","reach","follows","clicks","posts");targets={}
+ for key in allowed:
+  try:value=float(values.get(key) or 0)
+  except (TypeError,ValueError):c.close();return jsonify(error=f"{key.title()} target must be a number"),400
+  if value<0:c.close();return jsonify(error="Targets cannot be negative"),400
+  targets[key]=value
+ c.execute("UPDATE settings SET insights_targets=? WHERE id=1",(json.dumps(targets),));c.commit();c.close();return jsonify(ok=True,targets=targets)
 @app.post("/api/library")
 def add_library():
  if request.content_type and "multipart" in request.content_type:
