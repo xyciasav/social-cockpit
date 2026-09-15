@@ -7,7 +7,7 @@ from urllib.parse import urlsplit, urlunsplit
 from comfyui_client import ComfyUIClient, ComfyUIError
 from asset_processing import isolate_background, vectorize_png
 
-VERSION="1.16.0"; ROOT=Path(__file__).parent; DATA=Path(os.getenv("DATA_DIR",ROOT/"data")); UPLOADS=DATA/"uploads"; ASSETS=DATA/"generated-assets"; DB=DATA/"social-cockpit.db"
+VERSION="1.16.1"; ROOT=Path(__file__).parent; DATA=Path(os.getenv("DATA_DIR",ROOT/"data")); UPLOADS=DATA/"uploads"; ASSETS=DATA/"generated-assets"; DB=DATA/"social-cockpit.db"
 DATA.mkdir(exist_ok=True);UPLOADS.mkdir(exist_ok=True);ASSETS.mkdir(exist_ok=True)
 app=Flask(__name__);app.config["MAX_CONTENT_LENGTH"]=25*1024*1024
 def db(): c=sqlite3.connect(DB);c.row_factory=sqlite3.Row;return c
@@ -363,7 +363,10 @@ def approve(ident):
   try:
    data=buffer_call(s["buffer_token"],query,variables);post=data.get("createPost") or {};error=post.get("message")
   except (requests.RequestException,ValueError,AttributeError,IndexError) as e:return jsonify(error=f"Could not reach Buffer: {e}"),502
-  if error:return jsonify(error=f"{platform.title()}: {error}"),502
+  if error:
+   if media_urls and "image" in error.lower() and "url" in error.lower():
+    error += " Open each image URL in a private browser window: it must show the image directly without a login or error. For uploads, check the Public HTTPS address in Settings and ensure the media routes are publicly reachable. Image URLs: " + ", ".join(media_urls)
+   return jsonify(error=f"{platform.title()}: {error}"),502
   post_ids.append(post.get("post",{}).get("id"))
  c.execute("UPDATE drafts SET status='approved',buffer_id=? WHERE id=?",(json.dumps(post_ids),ident));c.commit();c.close();return jsonify(ok=True)
 @app.post("/api/drafts/send-ready")
@@ -373,7 +376,7 @@ def send_ready():
  for ident in ids:
   result=approve(ident);response,status=(result if isinstance(result,tuple) else (result,result.status_code))
   if status<400:sent.append(ident)
- else:failed.append({"id":ident,"error":(response.get_json(silent=True) or {}).get("error","Unknown error")})
+  else:failed.append({"id":ident,"error":(response.get_json(silent=True) or {}).get("error","Unknown error")})
  return jsonify(sent=len(sent),failed=failed)
 
 ASSET_TYPES={"Mixed","Illustrations","Icons / symbols","Borders / frames","Background elements","Textures","Decorative shapes"}

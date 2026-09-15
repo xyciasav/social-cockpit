@@ -11,12 +11,14 @@ Deploy a Git-backed stack using this repository, branch `main`, and `docker-comp
 The stack pulls the explicitly versioned image:
 
 ```text
-ghcr.io/xyciasav/social-cockpit:1.16.0
+ghcr.io/xyciasav/social-cockpit:1.16.1
 ```
 
 Open `http://SERVER_IP:38427`, then configure LM Studio and Buffer under Settings.
 
 For image scheduling, set the Facebook and Instagram Buffer channel IDs separately. Also set **Public app URL** to the stable public HTTPS address that reaches this container; Buffer must be able to download uploaded images from it when the post publishes.
+
+If Buffer reports **Image could not be read from its URL**, open the image URL shown in the error in a private browser window. It must display the image itself without a login, preview page, or error. For uploads, check that the Public HTTPS address points to this app and that `/media-file/` and `/media/` are reachable from the internet without authentication. A LAN address or a URL available only through your VPN will not work. For linked pictures, use a direct image URL. Keep the image available until the scheduled post publishes. See [Buffer's media hosting guide](https://developers.buffer.com/guides/hosting-media.html).
 
 LM Studio on the same Docker host normally uses `http://host.docker.internal:1234`. On another machine, use its LAN IP.
 
